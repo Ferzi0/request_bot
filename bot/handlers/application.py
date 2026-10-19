@@ -42,6 +42,7 @@ from bot.services.formatting import format_consent, format_send_failed, format_s
 from bot.services.notifier import AdminNotifier
 from bot.services.rate_limit import SlidingWindowLimiter
 from bot.services.storage import ApplicationRepository
+from bot.services.storage_alerts import StorageAlerts, mark_delivered_quietly, save_quietly
 from bot.services.validation import (
     InvalidInputError,
     Limits,
@@ -335,6 +336,7 @@ async def cb_submit(
     notifier: AdminNotifier,
     limiter: SlidingWindowLimiter,
     repository: ApplicationRepository,
+    storage_alerts: StorageAlerts,
 ) -> None:
     # Второе нажатие «Отправить» ждёт в очереди (SimpleEventIsolation), а когда
     # дойдёт, состояние уже сброшено — его перехватит any_callback («неактуальна»).
@@ -352,7 +354,7 @@ async def cb_submit(
     if draft.app_id is None:
         # Номер выдаётся один раз на черновик: повтор после сбоя придёт администратору
         # с тем же номером, и возможный дубль сразу видно.
-        draft = draft.model_copy(update={"app_id": new_application_id(now)})
+        draft = draft.model_copy(update={"app_id": new_application_id(now, settings.tz)})
         await save_draft(state, draft)
     applicant = Applicant(
         user_id=user.id,
@@ -367,8 +369,17 @@ async def cb_submit(
         app.source.value,
         len(app.task),
     )
-    await repository.add(app)
+    # Сохраняем ДО отправки: если Telegram недоступен, заявка всё равно останется
+    # в базе (с delivered_at = NULL). Сбой базы доставку не останавливает.
+    save_error = await save_quietly(repository, app)
     if await notifier.notify(bot, app):
+        # Всё о базе — до ответа клиенту: если клиент успел заблокировать бота,
+        # ответ ему упадёт, а отметка и уведомление администратору должны остаться.
+        if save_error:
+            # Порядок важен для текста: заявка уже у администратора («в сообщении выше»).
+            await storage_alerts.save_failed(bot, app.id, save_error)
+        elif mark_error := await mark_delivered_quietly(repository, app.id, datetime.now(UTC)):
+            await storage_alerts.mark_failed(bot, app.id, mark_error)
         limiter.hit(user.id)  # считаем только доставленные: сбой не съедает лимит
         await reset_form(state)
         await callback.message.answer(texts.SENT.format(app_id=app.id))

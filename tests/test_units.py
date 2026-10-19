@@ -147,7 +147,7 @@ def test_admin_message_uses_configured_timezone() -> None:
     moment = datetime(2026, 10, 17, 7, 30, tzinfo=UTC)
     assert format_local_time(moment, ZoneInfo("Asia/Yekaterinburg")) == "17.10.2026 12:30"
     app = Application(
-        id=new_application_id(moment),
+        id=new_application_id(moment, ZoneInfo("Asia/Yekaterinburg")),
         created_at=moment,
         source=Source.SITE,
         name="Анна",
@@ -208,3 +208,24 @@ async def test_startup_errors_are_reported_without_traceback(
     assert await entry.run(settings) == 1
     assert expected in caplog.text
     assert all(r.exc_info is None for r in caplog.records)
+
+
+def test_application_id_uses_local_date() -> None:
+    from zoneinfo import ZoneInfo
+
+    chelyabinsk = ZoneInfo("Asia/Yekaterinburg")  # UTC+5
+    # 18:59 UTC = 23:59 по Челябинску — ещё 19 октября
+    assert new_application_id(datetime(2026, 10, 19, 18, 59, tzinfo=UTC), chelyabinsk)[:6] == (
+        "261019"
+    )
+    # 19:00 UTC = 00:00 по Челябинску — уже 20-е, хотя в UTC ещё 19-е
+    assert new_application_id(datetime(2026, 10, 19, 19, 0, tzinfo=UTC), chelyabinsk)[:6] == (
+        "261020"
+    )
+    # 23:59 UTC = 04:59 следующего дня по Челябинску
+    assert new_application_id(datetime(2026, 10, 19, 23, 59, tzinfo=UTC), chelyabinsk)[:6] == (
+        "261020"
+    )
+    assert new_application_id(datetime(2026, 10, 19, 23, 59, tzinfo=UTC), ZoneInfo("UTC"))[:6] == (
+        "261019"
+    )

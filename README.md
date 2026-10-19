@@ -45,6 +45,85 @@ bot/
   middlewares.py    только личные чаты
   logging_setup.py  логи без токена и без текстов заявок
   handlers/         start, common (/help, /cancel, fallback), application (диалог), admin, errors
-  services/         validation, formatting (HTML-экранирование), notifier, rate_limit, storage
+  services/         validation, formatting (HTML-экранирование), notifier, rate_limit,
+                    storage (протокол хранилища), sqlite_repository (база заявок),
+                    storage_alerts (сбои базы → лог и уведомление вам)
 tests/              pytest: сценарии через dp.feed_update с подменённой сессией
 ```
+
+## База данных
+
+Каждая отправленная заявка сохраняется в SQLite: **`data/bot.db`** в папке проекта (путь меняется настройкой `DATABASE_PATH` в `.env`). Папка `data/` создаётся при первом запуске с правами только для владельца (`700`, новый файл базы — `600`; права уже существующего файла бот не меняет) и в git не попадает. Рядом лежат служебные `bot.db-wal` и `bot.db-shm` — это нормально (режим WAL); копию при работающем боте делайте командой `sqlite3 data/bot.db ".backup data/copy.db"` (простое копирование файлов во время записи может дать испорченную копию) или остановите бота и скопируйте `bot.db`.
+
+Что хранится — одна таблица `applications`, по строке на заявку (комментарии к столбцам видны в DDL таблицы):
+
+| Столбец | Что это |
+|---|---|
+| `id` | номер заявки `ГГММДД-XXXX` (тот же, что в Telegram), первичный ключ |
+| `created_at` | время отправки, **UTC**, `2026-10-19T07:15:03Z` |
+| `source` | `site` — пришёл по ссылке с сайта, `bot` — сам |
+| `name`, `contact`, `task` | как обращаться, почта/@ник, задача |
+| `project_type` | `site`, `landing`, `bot`, `service`, `shop`, `other` |
+| `consent` | согласие на обработку данных, всегда `1` |
+| `applicant_user_id`, `applicant_username`, `applicant_full_name` | Telegram-отправитель: id, ник без `@`, имя из профиля |
+| `delivered_at` | когда заявка дошла до вас в Telegram, UTC; `NULL` — не дошла (клиенту показан запасной контакт) |
+
+Заявка записывается в базу **до** отправки вам, поэтому в базе есть и недоставленные заявки (`delivered_at IS NULL`). Повторная отправка той же заявки (после сбоя доставки) не создаёт вторую строку и не сбрасывает отметку о доставке. Номер заявки строится по дате в поясе `TIMEZONE`, а время в столбцах — UTC.
+
+Схема версионируется (`PRAGMA user_version`, сейчас 2): при запуске бот сам доводит старую базу до текущей версии, данные сохраняются.
+
+**Если с базой что-то не так, бот сообщает вам в Telegram**, а заявки продолжают приходить:
+- при запуске — строка о базе в пробном сообщении («База данных: работает (схема v2, заявок: N).» или «⚠️ База данных недоступна…» с классом ошибки). Если `NOTIFY_ADMIN_ON_START=false`, пробного сообщения нет, но о недоступной базе бот всё равно напишет;
+- если заявку не удалось записать — «⚠️ Заявка … не сохранена в базу (…)» сразу после самой заявки; не чаще раза в час на один вид ошибки, в логе — каждый случай. Если не дошла и сама заявка, уведомления нет (оно бы тоже не дошло) — только лог.
+
+### Как смотреть в DBeaver
+
+Новое подключение → SQLite → Path: `<папка проекта>/data/bot.db` → Finish. Читать можно при работающем боте. Время в базе — UTC; по Челябинску:
+
+```sql
+SELECT id, datetime(created_at, '+5 hours') AS created_local,
+       datetime(delivered_at, '+5 hours') AS delivered_local, name, contact
+FROM applications ORDER BY created_at DESC;
+
+-- Недоставленные заявки (Telegram отказал — клиенту нужно ответить самому):
+SELECT id, created_at, name, contact, task
+FROM applications WHERE delivered_at IS NULL ORDER BY created_at DESC;
+```
+
+Работайте в режиме **авто-коммита** (в DBeaver он включён по умолчанию — переключатель Auto-Commit на панели). В ручном режиме коммита незавершённая транзакция с изменениями (например, `DELETE` без Commit) держит базу: бот ждёт до 5 секунд и заявку в базу не записывает (придёт уведомление «не сохранена»). Кроме того, `VACUUM` в ручном режиме не выполняется («cannot VACUUM from within a transaction»). После правок — Commit или вернитесь в авто-коммит; вкладку с результатами запроса лучше закрыть перед `wal_checkpoint`.
+
+### Как найти и удалить данные клиента
+
+Политика сайта обещает: хранить не дольше 1 календарного года после последнего сообщения и удалять по запросу. Автоудаления пока нет — делается вручную (DBeaver или `sqlite3 data/bot.db` в Терминале).
+
+```sql
+-- 1. Найти все заявки человека: по почте/нику из заявки или по Telegram id/нику.
+--    (контакт-ник хранится с «@», applicant_username — без «@»)
+SELECT id, created_at, delivered_at, name, contact, applicant_user_id, applicant_username
+FROM applications
+WHERE lower(contact) = lower('anna@mail.ru')
+   OR lower(contact) = lower('@anna_k')
+   OR applicant_user_id = 123456789
+   OR lower(applicant_username) = lower('anna_k');
+
+-- 2. Удалить их — ровно то же условие WHERE, что в поиске выше.
+DELETE FROM applications
+WHERE lower(contact) = lower('anna@mail.ru')
+   OR lower(contact) = lower('@anna_k')
+   OR applicant_user_id = 123456789
+   OR lower(applicant_username) = lower('anna_k');
+
+-- 3. Стереть удалённое физически: иначе остатки могут лежать в свободных
+--    страницах файла и в bot.db-wal. Порядок важен: VACUUM пишет чистую копию
+--    в bot.db-wal, а checkpoint переносит её в bot.db и очищает -wal
+--    (при работающем боте без checkpoint старые страницы остались бы в bot.db).
+VACUUM;
+PRAGMA wal_checkpoint(TRUNCATE);
+
+-- Заявки старше года (кандидаты на удаление по сроку хранения):
+SELECT id, created_at, delivered_at, name, contact
+FROM applications
+WHERE created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 year');
+```
+
+Срок по политике считается от **последнего сообщения** в переписке, а её в базе нет — перед удалением старых заявок проверьте, не продолжается ли общение. Копии базы в резервных копиях (Time Machine) этими командами не удаляются.

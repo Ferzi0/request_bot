@@ -9,6 +9,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
@@ -102,10 +103,11 @@ class Application(BaseModel):
             draft.project_type,
             draft.task,
         )
-        if not (name and contact and project_type and task and draft.consent):
+        app_id = draft.app_id  # выдаётся хендлером при первой попытке отправки
+        if not (app_id and name and contact and project_type and task and draft.consent):
             raise ValueError("draft is incomplete")
         return cls(
-            id=draft.app_id or new_application_id(now),
+            id=app_id,
             created_at=now,
             source=draft.source,
             name=name,
@@ -116,10 +118,12 @@ class Application(BaseModel):
         )
 
 
-def new_application_id(now: datetime) -> str:
-    """Номер заявки без БД: дата + 4 случайных hex-символа, например 261017-3F9A.
+def new_application_id(now: datetime, tz: ZoneInfo) -> str:
+    """Номер заявки: дата + 4 случайных hex-символа, например 261017-3F9A.
 
+    Дата — по местному поясу (TIMEZONE), а не UTC: иначе заявка, отправленная
+    в 02:00 по Челябинску, получила бы вчерашнюю дату в номере.
     Счётчик в памяти обнулялся бы при перезапуске и давал повторы; случайный
     хвост уникален на практике и не раскрывает, сколько всего заявок.
     """
-    return f"{now:%y%m%d}-{secrets.token_hex(2).upper()}"
+    return f"{now.astimezone(tz):%y%m%d}-{secrets.token_hex(2).upper()}"

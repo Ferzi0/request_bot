@@ -20,9 +20,11 @@ from bot import texts
 from bot.config import Settings
 from bot.handlers import get_routers
 from bot.middlewares import PrivateChatOnlyMiddleware
+from bot.services.formatting import format_database_status
 from bot.services.notifier import AdminNotifier, Sleep
 from bot.services.rate_limit import SlidingWindowLimiter
-from bot.services.storage import ApplicationRepository, NullRepository
+from bot.services.storage import ApplicationRepository, DatabaseStatus, NullRepository
+from bot.services.storage_alerts import StorageAlerts
 from bot.services.validation import Limits
 
 logger = logging.getLogger(__name__)
@@ -42,8 +44,10 @@ def create_dispatcher(
     settings: Settings,
     *,
     repository: ApplicationRepository | None = None,
+    database: DatabaseStatus | None = None,
     sleep: Sleep | None = None,
 ) -> Dispatcher:
+    """database — состояние базы при старте для сообщения администратору (None — не сообщать)."""
     # MemoryStorage: шаги диалога теряются при перезапуске — приемлемо, пока нет БД.
     # SimpleEventIsolation: апдейты ОДНОГО пользователя обрабатываются строго по очереди
     # (замок на его ключ FSM), разных пользователей — параллельно. Без этого два быстрых
@@ -66,6 +70,8 @@ def create_dispatcher(
     )
     dp["limiter"] = SlidingWindowLimiter(settings.applications_per_hour, window=3600)
     dp["repository"] = repository or NullRepository()
+    dp["database"] = database
+    dp["storage_alerts"] = StorageAlerts(settings.admin_id)
 
     private_only = PrivateChatOnlyMiddleware()
     dp.message.outer_middleware(private_only)
@@ -76,7 +82,7 @@ def create_dispatcher(
     return dp
 
 
-async def on_startup(bot: Bot, settings: Settings) -> None:
+async def on_startup(bot: Bot, settings: Settings, database: DatabaseStatus | None) -> None:
     """Меню команд и проверочное сообщение администратору. Ошибки здесь не фатальны."""
     try:
         await bot.set_my_commands(
@@ -90,9 +96,18 @@ async def on_startup(bot: Bot, settings: Settings) -> None:
     except TelegramAPIError as exc:
         logger.warning("Не удалось установить меню команд: %s", type(exc).__name__)
 
+    # Пробное сообщение — по настройке NOTIFY_ADMIN_ON_START, а о недоступной базе
+    # сообщаем всегда: иначе заказчик не узнает, что заявки перестали сохраняться.
+    db_line = format_database_status(database) if database is not None else None
     if settings.notify_admin_on_start:
+        text: str | None = "\n\n".join(filter(None, (texts.ADMIN_STARTED, db_line)))
+    elif database is not None and not database.ok:
+        text = db_line
+    else:
+        text = None
+    if text:
         try:
-            await bot.send_message(settings.admin_id, texts.ADMIN_STARTED)
+            await bot.send_message(settings.admin_id, text)
         except TelegramAPIError as exc:
             # Частая причина: администратор ещё не открыл бота и не нажал /start —
             # бот не может написать первым. Тогда заявки тоже не дойдут.

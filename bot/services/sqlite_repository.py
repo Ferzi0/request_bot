@@ -1,0 +1,363 @@
+"""Хранилище заявок в SQLite (файл data/bot.db).
+
+Почему стандартный sqlite3, а не aiosqlite. Модуль sqlite3 блокирующий, а бот
+асинхронный: долгий вызов в цикле событий заморозил бы всех пользователей.
+Поэтому все обращения к базе идут в ОДНОМ отдельном потоке (ThreadPoolExecutor
+с max_workers=1): соединение создаётся и используется только в нём, запросы
+выполняются строго по очереди. aiosqlite устроен так же, но это лишняя
+зависимость ради нескольких записей в день.
+
+Схема версионируется через PRAGMA user_version: при старте недостающие
+миграции из MIGRATIONS применяются по порядку, каждая в своей транзакции.
+Чтобы добавить столбец позже — допишите новую строку в конец MIGRATIONS,
+старые не меняйте.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
+from types import TracebackType
+from typing import Self
+
+from bot.models import Applicant, Application, ProjectType, Source
+from bot.services.storage import DatabaseStatus
+
+logger = logging.getLogger(__name__)
+
+# Время храним в UTC, ISO 8601 с суффиксом Z: «2026-10-19T07:15:03Z».
+# - UTC не зависит от пояса Mac или будущего хостинга и от перехода на летнее время;
+# - строки одного формата сортируются как время, поэтому индекс работает и для
+#   «старше года»: created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 year');
+# - местное время в DBeaver: datetime(created_at, 'localtime') или '+5 hours'.
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+# Сколько ждать, если база занята другим соединением (например, DBeaver пишет).
+BUSY_TIMEOUT_MS = 5000
+
+# Миграции: индекс + 1 = номер версии схемы. Комментарии внутри CREATE TABLE
+# SQLite сохраняет в sqlite_master, поэтому DBeaver покажет их в DDL таблицы.
+MIGRATIONS: tuple[str, ...] = (
+    # --- версия 1: таблица заявок ---
+    """
+    CREATE TABLE applications (
+        -- Номер заявки, тот же, что видят клиент и администратор: ГГММДД-XXXX.
+        id                  TEXT    NOT NULL PRIMARY KEY,
+        -- Когда отправлена (первая попытка), UTC, ISO 8601: 2026-10-19T07:15:03Z.
+        created_at          TEXT    NOT NULL
+            CHECK (created_at GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+        -- Откуда пришёл человек: site — по ссылке с сайта, bot — сам нашёл бота.
+        source              TEXT    NOT NULL CHECK (source IN ('site', 'bot')),
+        -- Как обращаться (2–80 символов).
+        name                TEXT    NOT NULL,
+        -- Почта или @ник для ответа (до 120 символов).
+        contact             TEXT    NOT NULL,
+        -- Тип проекта: site = Сайт-визитка, landing = Лендинг, bot = Telegram-бот,
+        -- service = Веб-сервис, shop = Интернет-магазин, other = Другое.
+        project_type        TEXT    NOT NULL
+            CHECK (project_type IN ('site', 'landing', 'bot', 'service', 'shop', 'other')),
+        -- Задача своими словами (10–1000 символов).
+        task                TEXT    NOT NULL,
+        -- Согласие на обработку данных. Без него заявку не отправить, поэтому всегда 1;
+        -- хранится явно, чтобы по строке было видно: согласие было дано.
+        consent             INTEGER NOT NULL CHECK (consent = 1),
+        -- Telegram-отправитель: числовой id (по нему удаляют данные по запросу),
+        -- @ник без «@» (NULL, если ника нет) и имя из профиля.
+        applicant_user_id   INTEGER NOT NULL,
+        applicant_username  TEXT,
+        applicant_full_name TEXT    NOT NULL
+    ) STRICT;
+
+    -- Для срока хранения: найти и удалить заявки старше года.
+    CREATE INDEX applications_created_at_idx ON applications (created_at);
+    -- Для запросов «удалите мои данные»: все заявки одного человека.
+    CREATE INDEX applications_applicant_user_id_idx ON applications (applicant_user_id);
+    """,
+    # --- версия 2: отметка о доставке администратору ---
+    # Комментарий стоит ВНУТРИ определения столбца: при ADD COLUMN SQLite вписывает
+    # в DDL таблицы только текст определения, комментарий перед ним потерялся бы.
+    # CHECK в ADD COLUMN допустим: у старых строк NULL, условие для них выполняется.
+    """
+    ALTER TABLE applications ADD COLUMN delivered_at TEXT
+        -- Когда заявка дошла до администратора в Telegram, UTC, как created_at.
+        -- NULL — не доставлена (Telegram отказал, клиенту показан запасной контакт).
+        CHECK (delivered_at IS NULL OR delivered_at GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z');
+    """,
+)
+
+# ON CONFLICT: повтор «Отправить» после сбоя доставки приходит с тем же номером.
+# Дубля не будет: строка обновляется до последней отправленной версии (человек мог
+# поправить поле через «Изменить»), а created_at остаётся временем первой попытки.
+# WHERE: номер случайный, и если вдруг совпадёт с чужой заявкой — её не трогаем
+# (rowcount = 0 → ApplicationIdTakenError).
+# delivered_at в SET нет намеренно: повтор не сбрасывает отметку о доставке.
+_UPSERT = """
+INSERT INTO applications (
+    id, created_at, source, name, contact, project_type, task, consent,
+    applicant_user_id, applicant_username, applicant_full_name
+) VALUES (
+    :id, :created_at, :source, :name, :contact, :project_type, :task, 1,
+    :applicant_user_id, :applicant_username, :applicant_full_name
+)
+ON CONFLICT (id) DO UPDATE SET
+    source = excluded.source,
+    name = excluded.name,
+    contact = excluded.contact,
+    project_type = excluded.project_type,
+    task = excluded.task,
+    applicant_username = excluded.applicant_username,
+    applicant_full_name = excluded.applicant_full_name
+WHERE applications.applicant_user_id = excluded.applicant_user_id
+"""
+
+# COALESCE: отметка ставится один раз — повторный вызов не сдвигает время доставки.
+_MARK_DELIVERED = """
+UPDATE applications
+SET delivered_at = COALESCE(delivered_at, :delivered_at)
+WHERE id = :id
+"""
+
+_SELECT_ONE = """
+SELECT id, created_at, source, name, contact, project_type, task,
+       applicant_user_id, applicant_username, applicant_full_name
+FROM applications
+WHERE id = ?
+"""
+
+
+class SchemaError(RuntimeError):
+    """База создана более новой версией бота — старый код её не понимает."""
+
+
+class ApplicationIdTakenError(RuntimeError):
+    """Случайный номер совпал с заявкой другого человека: новая заявка не записана.
+
+    Именно исключение, а не тихий возврат: хендлер должен узнать, что заявки в базе
+    нет, — сообщить администратору и НЕ ставить отметку о доставке (по этому номеру
+    она легла бы на чужую строку).
+    """
+
+
+class SqliteRepository:
+    """Реализует ApplicationRepository поверх SQLite.
+
+    Использование:
+        async with SqliteRepository(Path("data/bot.db")) as repo:
+            await repo.add(application)
+    или явно open()/close() — так сделано в bot/__main__.py.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        # ":memory:" — база в памяти (для тестов), иначе путь к файлу.
+        self._path = path if path == ":memory:" else Path(path)
+        self._executor: ThreadPoolExecutor | None = None
+        self._conn: sqlite3.Connection | None = None
+
+    # ---------- жизненный цикл ----------
+
+    async def open(self) -> None:
+        if self._executor is not None:
+            raise RuntimeError("SqliteRepository уже открыт")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite")
+        try:
+            await self._run(self._open_sync)
+        except BaseException:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+            raise
+
+    async def close(self) -> None:
+        if self._executor is None:
+            return
+        try:
+            await self._run(self._close_sync)
+        finally:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    async def __aenter__(self) -> Self:
+        await self.open()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    # ---------- операции ----------
+
+    async def add(self, application: Application) -> None:
+        await self._run(self._add_sync, application)
+
+    async def mark_delivered(self, app_id: str, delivered_at: datetime) -> None:
+        await self._run(self._mark_delivered_sync, app_id, delivered_at)
+
+    async def status(self) -> DatabaseStatus:
+        """Версия схемы и число заявок — для сообщения администратору при старте."""
+        return await self._run(self._status_sync)
+
+    async def get_delivered_at(self, app_id: str) -> datetime | None:
+        """Время доставки по номеру (None — не доставлена). Для тестов и отладки."""
+        return await self._run(self._get_delivered_at_sync, app_id)
+
+    async def get(self, app_id: str) -> Application | None:
+        """Заявка по номеру. Боту не нужна (он только пишет) — для тестов и отладки."""
+        return await self._run(self._get_sync, app_id)
+
+    # ---------- синхронная часть: выполняется только в потоке базы ----------
+
+    def _open_sync(self) -> None:
+        if isinstance(self._path, Path):
+            # 0o700: в базе персональные данные — папка только для владельца.
+            self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # autocommit=True: каждый запрос — сам себе транзакция, а там, где нужно
+        # несколько запросов сразу (миграции), пишем BEGIN/COMMIT явно.
+        # Иначе модуль sqlite3 сам открывает транзакции в неочевидные моменты.
+        is_new_file = isinstance(self._path, Path) and not self._path.exists()
+        conn = sqlite3.connect(self._path, autocommit=True)
+        conn.row_factory = sqlite3.Row  # строки как словари: row["name"], а не row[3]
+        try:
+            if is_new_file and isinstance(self._path, Path):
+                # 600 — только при создании: права существующего файла выбрал его
+                # владелец (или DATABASE_PATH указан по ошибке) — их не трогаем.
+                # -wal и -shm SQLite создаёт с теми же правами, что и сам файл.
+                self._path.chmod(0o600)
+            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+            # WAL: читатели (DBeaver) не блокируют запись бота и наоборот.
+            # Режим запоминается в самом файле базы.
+            conn.execute("PRAGMA journal_mode = WAL")
+            # foreign_keys не включаем: внешних ключей в схеме нет (одна таблица).
+            _migrate(conn)
+        except BaseException:
+            conn.close()
+            raise
+        self._conn = conn
+
+    def _close_sync(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _add_sync(self, app: Application) -> None:
+        cursor = self._connection().execute(_UPSERT, _to_row(app))
+        if cursor.rowcount == 0:
+            # Совпал случайный номер с заявкой ДРУГОГО человека: чужую строку не трогаем.
+            # В тексте исключения — только номер, без данных заявки.
+            raise ApplicationIdTakenError(f"Номер {app.id} уже занят другой заявкой")
+
+    def _mark_delivered_sync(self, app_id: str, delivered_at: datetime) -> None:
+        params = {"id": app_id, "delivered_at": _utc_text(delivered_at)}
+        if self._connection().execute(_MARK_DELIVERED, params).rowcount == 0:
+            # Строки нет — значит, не удалась запись самой заявки (об этом уже есть ERROR).
+            logger.warning("Заявка %s: нет в базе, отметку о доставке ставить некуда", app_id)
+
+    def _status_sync(self) -> DatabaseStatus:
+        conn = self._connection()
+        (count,) = conn.execute("SELECT count(*) FROM applications").fetchone()
+        return DatabaseStatus(schema_version=_schema_version(conn), applications=int(count))
+
+    def _get_delivered_at_sync(self, app_id: str) -> datetime | None:
+        sql = "SELECT delivered_at FROM applications WHERE id = ?"
+        row = self._connection().execute(sql, (app_id,)).fetchone()
+        if row is None or row["delivered_at"] is None:
+            return None
+        return datetime.strptime(row["delivered_at"], TIME_FORMAT).replace(tzinfo=UTC)
+
+    def _get_sync(self, app_id: str) -> Application | None:
+        row = self._connection().execute(_SELECT_ONE, (app_id,)).fetchone()
+        return None if row is None else _from_row(row)
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            raise RuntimeError("SqliteRepository не открыт: вызовите open()")
+        return self._conn
+
+    async def _run[**P, R](self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+        if self._executor is None:
+            raise RuntimeError("SqliteRepository не открыт: вызовите open()")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, lambda: func(*args, **kwargs))
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Доводит схему до последней версии. Каждая миграция — одна транзакция."""
+    target = len(MIGRATIONS)
+    while (current := _schema_version(conn)) != target:
+        if current > target:
+            raise SchemaError(
+                f"Версия схемы базы {current}, а этот код знает только до {target}: "
+                "база от более новой версии бота."
+            )
+        # BEGIN IMMEDIATE сразу берёт блокировку записи: два процесса бота
+        # не выполнят одну и ту же миграцию одновременно.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Перечитываем версию уже под блокировкой: пока мы её ждали, другая копия
+            # бота могла применить эту миграцию — повторный CREATE TABLE упал бы.
+            applied = _schema_version(conn) == current
+            if applied:
+                # executescript — несколько команд за раз; f-строка безопасна:
+                # подставляется наше целое число, а не ввод пользователя.
+                conn.executescript(MIGRATIONS[current] + f"\nPRAGMA user_version = {current + 1};")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        if applied:
+            logger.info("База данных: схема обновлена до версии %d", current + 1)
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    (version,) = conn.execute("PRAGMA user_version").fetchone()
+    return int(version)
+
+
+def _utc_text(moment: datetime) -> str:
+    if moment.tzinfo is None:
+        # Наивное время неоднозначно (чей пояс?) — лучше явная ошибка, чем сдвиг на часы.
+        raise ValueError("datetime must be timezone-aware")
+    return moment.astimezone(UTC).strftime(TIME_FORMAT)
+
+
+def _to_row(app: Application) -> dict[str, object]:
+    return {
+        "id": app.id,
+        "created_at": _utc_text(app.created_at),
+        "source": app.source.value,
+        "name": app.name,
+        "contact": app.contact,
+        "project_type": app.project_type.value,
+        "task": app.task,
+        "applicant_user_id": app.applicant.user_id,
+        "applicant_username": app.applicant.username,
+        "applicant_full_name": app.applicant.full_name,
+    }
+
+
+def _from_row(row: sqlite3.Row) -> Application:
+    # Значения из базы pydantic проверит при создании модели (типы, enum-ы).
+    return Application(
+        id=row["id"],
+        created_at=datetime.strptime(row["created_at"], TIME_FORMAT).replace(tzinfo=UTC),
+        source=Source(row["source"]),
+        name=row["name"],
+        contact=row["contact"],
+        project_type=ProjectType(row["project_type"]),
+        task=row["task"],
+        applicant=Applicant(
+            user_id=row["applicant_user_id"],
+            username=row["applicant_username"],
+            full_name=row["applicant_full_name"],
+        ),
+    )

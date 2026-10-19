@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from bot import texts
 from bot.models import Application, ApplicationDraft
+from bot.services.storage import DatabaseStatus
 from bot.services.validation import telegram_username_url
 
 
@@ -78,3 +79,10 @@ def admin_reply_url(app: Application) -> str:
     if url := telegram_username_url(app.contact):
         return url
     return f"tg://user?id={app.applicant.user_id}"
+
+
+def format_database_status(status: DatabaseStatus) -> str:
+    """Строка о базе для стартового сообщения администратору."""
+    if status.error is not None:
+        return texts.ADMIN_DB_UNAVAILABLE.format(error=escape(status.error))
+    return texts.ADMIN_DB_OK.format(version=status.schema_version, count=status.applications)

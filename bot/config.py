@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     notify_admin_on_start: bool = True
     log_level: str = "INFO"
 
+    # Файл базы заявок. Относительный путь считается от папки проекта (как и .env),
+    # чтобы база не оказалась в случайном месте при запуске из другого каталога.
+    database_path: Path = PROJECT_ROOT / "data" / "bot.db"
+
     # Повторы отправки администратору: паузы между попытками, секунды.
     # (1, 3) = 3 попытки: сразу, через 1 с, ещё через 3 с.
     send_retry_delays: tuple[float, ...] = (1.0, 3.0)
@@ -103,6 +107,15 @@ class Settings(BaseSettings):
             raise ValueError("log level")
         return value
 
+    @field_validator("database_path")
+    @classmethod
+    def _resolve_database_path(cls, value: Path) -> Path:
+        # Пустое DATABASE_PATH= превращается в Path(".") — это папка проекта, а не файл.
+        if str(value).strip() in {"", "."}:
+            raise ValueError("database path is empty")
+        path = value.expanduser()
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
@@ -125,6 +138,7 @@ _HINTS: dict[str, str] = {
     "policy_url": "POLICY_URL должен начинаться с https:// (или оставьте пустым).",
     "timezone": "TIMEZONE: неизвестный часовой пояс. Пример: Asia/Yekaterinburg.",
     "log_level": "LOG_LEVEL: допустимо DEBUG, INFO, WARNING, ERROR.",
+    "database_path": "DATABASE_PATH: укажите путь к файлу базы, например data/bot.db.",
 }
 
 

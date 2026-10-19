@@ -12,6 +12,7 @@ import itertools
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
@@ -237,13 +238,16 @@ def callback_of(method: SendMessage, text: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Переменные окружения разработчика не должны влиять на тесты."""
     import os
 
     for name in list(os.environ):
         if name in Settings.model_fields or name.lower() in Settings.model_fields:
             monkeypatch.delenv(name)
+    # Страховка: даже тест, запускающий bot.__main__.run(), не создаст data/bot.db
+    # в проекте — база по умолчанию уходит во временную папку теста.
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "default.db"))
 
 
 @pytest.fixture
