@@ -11,7 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
 # .env ищем рядом с проектом, а не в текущем каталоге: так `python -m bot`
 # работает одинаково, откуда бы его ни запустили.
@@ -137,7 +137,10 @@ _HINTS: dict[str, str] = {
     "admin_id": "ADMIN_ID в .env должен быть положительным числом — ваш Telegram ID.",
     "policy_url": "POLICY_URL должен начинаться с https:// (или оставьте пустым).",
     "timezone": "TIMEZONE: неизвестный часовой пояс. Пример: Asia/Yekaterinburg.",
-    "log_level": "LOG_LEVEL: допустимо DEBUG, INFO, WARNING, ERROR.",
+    "log_level": "LOG_LEVEL: допустимо DEBUG, INFO, WARNING, ERROR, CRITICAL.",
+    "send_retry_delays": (
+        "SEND_RETRY_DELAYS: паузы в секундах списком в квадратных скобках, например [1, 3]."
+    ),
     "database_path": "DATABASE_PATH: укажите путь к файлу базы, например data/bot.db.",
 }
 
@@ -153,3 +156,11 @@ def load_settings(**overrides: object) -> Settings:
             hint = _HINTS.get(f"{field}:{err['type']}") or _HINTS.get(field)
             lines.append(hint or f"Параметр {field.upper()} в .env заполнен неверно.")
         raise ConfigError("\n".join(dict.fromkeys(lines))) from None
+    except SettingsError as exc:
+        # Списки (SEND_RETRY_DELAYS) pydantic-settings разбирает как JSON ещё до проверки
+        # типов, и ошибка разбора приходит не ValidationError, а SettingsError.
+        # Значение в её тексте не печатается — только имя поля.
+        found = re.search(r'field "(\w+)"', str(exc))
+        field = found.group(1) if found else "?"
+        hint = _HINTS.get(field) or f"Параметр {field.upper()} в .env заполнен неверно."
+        raise ConfigError(hint) from None

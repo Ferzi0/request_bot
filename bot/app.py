@@ -89,6 +89,11 @@ def create_dispatcher(
     return dp
 
 
+# Вызовы при старте — не критичны, поэтому ждём ответа недолго: по умолчанию aiogram ждёт 60 с,
+# и при недоступном Telegram старт растянулся бы на минуты (заявки при этом не теряются).
+STARTUP_REQUEST_TIMEOUT = 10
+
+
 async def on_startup(bot: Bot, settings: Settings, database: DatabaseStatus | None) -> None:
     """Меню команд и проверочное сообщение администратору. Ошибки здесь не фатальны."""
     common = [
@@ -97,7 +102,11 @@ async def on_startup(bot: Bot, settings: Settings, database: DatabaseStatus | No
         BotCommand(command="cancel", description=texts.CMD_CANCEL),
     ]
     try:
-        await bot.set_my_commands(common, scope=BotCommandScopeAllPrivateChats())
+        await bot.set_my_commands(
+            common,
+            scope=BotCommandScopeAllPrivateChats(),
+            request_timeout=STARTUP_REQUEST_TIMEOUT,
+        )
     except TelegramAPIError as exc:
         logger.warning("Не удалось установить меню команд: %s", type(exc).__name__)
     # Меню администратора — отдельным scope на его чат: Telegram показывает список
@@ -108,9 +117,25 @@ async def on_startup(bot: Bot, settings: Settings, database: DatabaseStatus | No
         await bot.set_my_commands(
             [*common, BotCommand(command="admin", description=texts.CMD_ADMIN)],
             scope=BotCommandScopeChat(chat_id=settings.admin_id),
+            request_timeout=STARTUP_REQUEST_TIMEOUT,
         )
     except TelegramAPIError as exc:
         logger.warning("Не удалось установить меню администратора: %s", type(exc).__name__)
+
+    # Описание бота — из кода, чтобы текст жил в git рядом с остальными, а не только
+    # в @BotFather. Telegram принимает повтор того же текста спокойно, поэтому ставим
+    # при каждом старте и ничего не храним. Без language_code — для всех языков.
+    # Имя бота (set_my_name) не трогаем: его выбрал заказчик.
+    try:
+        await bot.set_my_description(texts.BOT_DESCRIPTION, request_timeout=STARTUP_REQUEST_TIMEOUT)
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось установить описание бота: %s", type(exc).__name__)
+    try:
+        await bot.set_my_short_description(
+            texts.BOT_SHORT_DESCRIPTION, request_timeout=STARTUP_REQUEST_TIMEOUT
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось установить короткое описание бота: %s", type(exc).__name__)
 
     # Пробное сообщение — по настройке NOTIFY_ADMIN_ON_START, а о недоступной базе
     # сообщаем всегда: иначе заказчик не узнает, что заявки перестали сохраняться.

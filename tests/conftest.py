@@ -66,6 +66,8 @@ class MockSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.requests: list[TelegramMethod[Any]] = []
+        # Таймаут, с которым вызван каждый запрос (None — по умолчанию aiogram).
+        self.timeouts: list[tuple[TelegramMethod[Any], int | None]] = []
         self._ids = itertools.count(1)
         # hook(method) может бросить исключение (имитация сбоя) или вернуть
         # значение; None — значит «отвечай по умолчанию».
@@ -99,6 +101,7 @@ class MockSession(BaseSession):
         timeout: int | None = None,  # noqa: ASYNC109 — сигнатура задана aiogram
     ) -> Any:
         self.requests.append(method)
+        self.timeouts.append((method, timeout))
         if self.slow_chat is not None and getattr(method, "chat_id", None) == self.slow_chat:
             await asyncio.sleep(0.05)
         if self.hook is not None:

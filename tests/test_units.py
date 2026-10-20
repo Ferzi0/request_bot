@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from bot.config import ConfigError, load_settings
+from bot.config import ConfigError, Settings, load_settings
 from bot.logging_setup import RedactingFormatter
 from bot.models import Applicant, Application, ProjectType, Source, new_application_id
 from bot.services.formatting import format_admin_application, format_local_time
@@ -68,6 +70,35 @@ def test_invalid_timezone_and_policy() -> None:
             policy_url="javascript:alert(1)",
         )
     assert "TIMEZONE" in str(err.value) and "POLICY_URL" in str(err.value)
+
+
+@pytest.mark.parametrize("raw", ["1,3", "[1, 3", "abc"])
+def test_retry_delays_not_json_is_config_error(
+    raw: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ошибку разбора JSON pydantic-settings бросает SettingsError, а не ValidationError:
+    # без перехвата `python -m bot` падал бы с трейсбеком вместо русской подсказки.
+    env = tmp_path / ".env"
+    env.write_text(f"BOT_TOKEN={FAKE_TOKEN}\nADMIN_ID=1\nSEND_RETRY_DELAYS={raw}\n")
+    with pytest.raises(ConfigError, match=r"SEND_RETRY_DELAYS.*\[1, 3\]"):
+        load_settings(_env_file=env)
+    monkeypatch.setenv("SEND_RETRY_DELAYS", raw)  # из окружения — то же самое
+    with pytest.raises(ConfigError, match="SEND_RETRY_DELAYS"):
+        load_settings(_env_file=None, bot_token=FAKE_TOKEN, admin_id=1)
+
+
+def test_env_example_uncommented_gives_defaults(tmp_path) -> None:
+    # Раскомментированный .env.example (с фиктивными токеном и ID) = значения по умолчанию.
+    example = (Path(__file__).parent.parent / ".env.example").read_text(encoding="utf-8")
+    lines = [re.sub(r"^# ([A-Z_]+=)", r"\1", line) for line in example.splitlines()]
+    env = tmp_path / ".env"
+    env.write_text("\n".join([*lines, f"BOT_TOKEN={FAKE_TOKEN}", "ADMIN_ID=1"]), encoding="utf-8")
+    loaded = load_settings(_env_file=env)
+    defaults = load_settings(_env_file=None, bot_token=FAKE_TOKEN, admin_id=1)
+    assert loaded.send_retry_delays == (1.0, 3.0)
+    for field in Settings.model_fields:
+        if field not in {"bot_token", "fallback_contact"}:  # контакт в примере задан
+            assert getattr(loaded, field) == getattr(defaults, field), field
 
 
 # ---------- очистка и проверка ----------
