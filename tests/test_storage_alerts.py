@@ -127,7 +127,7 @@ async def test_startup_reports_working_database(
     await start(create_dispatcher(settings, database=status), bot)
     (message,) = session.sent(ADMIN_ID)
     assert message.text == (
-        texts.ADMIN_STARTED + "\n\nБаза данных: работает (схема v2, заявок: 2)."
+        texts.ADMIN_STARTED + "\n\nБаза данных: работает (схема v3, заявок: 2)."
     )
 
 
@@ -396,9 +396,9 @@ async def test_migrates_v1_file_with_data(tmp_path: Path) -> None:
 
     async with SqliteRepository(db) as repository:
         status = await repository.status()
-        assert (status.schema_version, status.applications) == (2, 1)
+        assert (status.schema_version, status.applications) == (3, 1)  # v1 → v2 → v3
         old = await repository.get("261018-AAAA")
-        assert old is not None and old.task == "Магазин запчастей"
+        assert old is not None and old.application.task == "Магазин запчастей"
         assert await repository.get_delivered_at("261018-AAAA") is None  # старым — NULL
         moment = datetime(2026, 10, 19, 10, 0, tzinfo=UTC)
         await repository.mark_delivered("261018-AAAA", moment)
@@ -411,4 +411,4 @@ async def test_migrates_v1_file_with_data(tmp_path: Path) -> None:
 
 async def test_new_database_is_created_at_latest_version(tmp_path: Path) -> None:
     async with SqliteRepository(tmp_path / "bot.db") as repository:
-        assert (await repository.status()).schema_version == len(sqlite_repository.MIGRATIONS) == 2
+        assert (await repository.status()).schema_version == len(sqlite_repository.MIGRATIONS) == 3

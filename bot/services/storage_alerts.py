@@ -20,7 +20,7 @@ from html import escape
 from aiogram import Bot
 
 from bot import texts
-from bot.models import Application
+from bot.models import Application, ApplicationStatus
 from bot.services.storage import ApplicationRepository
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,14 @@ class StorageAlerts:
 
     async def mark_failed(self, bot: Bot, app_id: str, error: str) -> None:
         text = texts.ADMIN_DB_MARK_FAILED.format(app_id=escape(app_id), error=escape(error))
+        await self._send(bot, error, text)
+
+    async def status_failed(
+        self, bot: Bot, app_id: str, status: ApplicationStatus, error: str
+    ) -> None:
+        text = texts.ADMIN_DB_STATUS_FAILED.format(
+            app_id=escape(app_id), status=escape(status.label), error=escape(error)
+        )
         await self._send(bot, error, text)
 
     async def _send(self, bot: Bot, error: str, text: str) -> None:

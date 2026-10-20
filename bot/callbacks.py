@@ -45,3 +45,29 @@ class EditFieldCallback(CallbackData, prefix="ef"):
 class AdminCallback(CallbackData, prefix="adm"):
     action: str  # пока только "take"; строка, чтобы добавлять действия без миграций
     app_id: str
+
+
+class PanelAction(StrEnum):
+    HOME = "h"  # главный экран со счётчиками
+    LIST = "l"  # страница списка
+    CARD = "c"  # карточка заявки
+    ASK_CANCEL = "q"  # «Отменить?» — подтверждение
+    SET = "s"  # сменить статус на target
+
+
+# Фильтр списка: код статуса или ALL. Хранится в кнопках карточки, чтобы
+# «‹ К списку» вернул на ту же страницу того же раздела.
+LIST_ALL = "all"
+
+
+class PanelCallback(CallbackData, prefix="p"):
+    """Кнопки админ-панели. Поля однобуквенные: лимит callback_data — 64 байта.
+
+    Самая длинная кнопка — «p:s:cancelled:999:261019-ABCD:cancelled» — около 40 байт.
+    """
+
+    a: PanelAction
+    f: str = LIST_ALL  # фильтр списка (статус или all)
+    p: int = 0  # номер страницы, с нуля
+    i: str = ""  # номер заявки
+    t: str = ""  # целевой статус для SET

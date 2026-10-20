@@ -127,3 +127,59 @@ def new_application_id(now: datetime, tz: ZoneInfo) -> str:
     хвост уникален на практике и не раскрывает, сколько всего заявок.
     """
     return f"{now.astimezone(tz):%y%m%d}-{secrets.token_hex(2).upper()}"
+
+
+class ApplicationStatus(StrEnum):
+    """Статус заявки в базе. Значение — код в столбце status и в callback_data."""
+
+    NEW = "new"
+    IN_WORK = "in_work"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+    @property
+    def label(self) -> str:
+        return _STATUS_LABELS[self][1]
+
+    @property
+    def icon(self) -> str:
+        return _STATUS_LABELS[self][0]
+
+
+_STATUS_LABELS: dict[ApplicationStatus, tuple[str, str]] = {
+    ApplicationStatus.NEW: ("🆕", "Новая"),
+    ApplicationStatus.IN_WORK: ("🔧", "В работе"),
+    ApplicationStatus.DONE: ("✅", "Выполнена"),
+    ApplicationStatus.CANCELLED: ("🚫", "Отменена"),
+}
+
+# ЕДИНСТВЕННОЕ место, где описано, какие переходы разрешены (решение заказчика).
+# По нему репозиторий отвергает недопустимые смены статуса, а клавиатура карточки
+# показывает только допустимые кнопки — правило не может разойтись в двух местах.
+ALLOWED_TRANSITIONS: dict[ApplicationStatus, tuple[ApplicationStatus, ...]] = {
+    ApplicationStatus.NEW: (ApplicationStatus.IN_WORK, ApplicationStatus.CANCELLED),
+    ApplicationStatus.IN_WORK: (
+        ApplicationStatus.DONE,
+        ApplicationStatus.CANCELLED,
+        ApplicationStatus.NEW,  # «Вернуть в новые»
+    ),
+    ApplicationStatus.DONE: (ApplicationStatus.NEW,),
+    ApplicationStatus.CANCELLED: (ApplicationStatus.NEW,),
+}
+
+
+def can_transition(current: ApplicationStatus, target: ApplicationStatus) -> bool:
+    return target in ALLOWED_TRANSITIONS[current]
+
+
+class ApplicationRecord(BaseModel):
+    """Заявка, как она лежит в базе: сама заявка + её судьба у администратора."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application: Application
+    status: ApplicationStatus
+    delivered_at: datetime | None = None
+    # Когда взята в работу (NULL у новой) и когда закрыта (done/cancelled).
+    taken_at: datetime | None = None
+    closed_at: datetime | None = None

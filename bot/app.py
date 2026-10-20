@@ -14,7 +14,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
 
 from bot import texts
 from bot.config import Settings
@@ -84,17 +84,26 @@ def create_dispatcher(
 
 async def on_startup(bot: Bot, settings: Settings, database: DatabaseStatus | None) -> None:
     """Меню команд и проверочное сообщение администратору. Ошибки здесь не фатальны."""
+    common = [
+        BotCommand(command="start", description=texts.CMD_START),
+        BotCommand(command="help", description=texts.CMD_HELP),
+        BotCommand(command="cancel", description=texts.CMD_CANCEL),
+    ]
     try:
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description=texts.CMD_START),
-                BotCommand(command="help", description=texts.CMD_HELP),
-                BotCommand(command="cancel", description=texts.CMD_CANCEL),
-            ],
-            scope=BotCommandScopeAllPrivateChats(),
-        )
+        await bot.set_my_commands(common, scope=BotCommandScopeAllPrivateChats())
     except TelegramAPIError as exc:
         logger.warning("Не удалось установить меню команд: %s", type(exc).__name__)
+    # Меню администратора — отдельным scope на его чат: Telegram показывает список
+    # самого узкого scope, поэтому общие команды повторяем, а «Админ-панель»
+    # видит только он. Если администратор ещё не писал боту, Telegram откажет —
+    # это не мешает работе: /admin работает и без пункта в меню.
+    try:
+        await bot.set_my_commands(
+            [*common, BotCommand(command="admin", description=texts.CMD_ADMIN)],
+            scope=BotCommandScopeChat(chat_id=settings.admin_id),
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось установить меню администратора: %s", type(exc).__name__)
 
     # Пробное сообщение — по настройке NOTIFY_ADMIN_ON_START, а о недоступной базе
     # сообщаем всегда: иначе заказчик не узнает, что заявки перестали сохраняться.

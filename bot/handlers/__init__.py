@@ -7,7 +7,7 @@ aiogram разрешает подключить роутер только к о�
 
 from aiogram import Router
 
-from bot.handlers import admin, application, common, errors, start
+from bot.handlers import admin, application, common, errors, panel, start
 
 
 def get_routers() -> list[Router]:
@@ -15,6 +15,7 @@ def get_routers() -> list[Router]:
     return [
         errors.create_router(),  # исключения из любых хендлеров
         start.create_router(),  # /start сбрасывает любой шаг
+        panel.create_router(),  # /admin — до общих команд, иначе его поймает «неизвестная команда»
         common.create_commands_router(),  # /help, /cancel и «Отмена» — на любом шаге
         admin.create_router(),  # кнопки под заявками у администратора
         application.create_router(),  # шаги заявки

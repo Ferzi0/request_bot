@@ -27,6 +27,7 @@ BTN_TAKE = "✅ В работу"
 CMD_START = "Начать и оставить заявку"
 CMD_HELP = "Как пользоваться ботом"
 CMD_CANCEL = "Отменить заявку"
+CMD_ADMIN = "Админ-панель"  # видна в меню только администратору
 
 # --- приветствие и справка ---
 GREETING = (
@@ -122,7 +123,7 @@ UNEXPECTED_ERROR = (
 
 # --- сообщения администратору ---
 ADMIN_APPLICATION = (
-    "<b>Новая заявка № {app_id}</b>\n"
+    "<b>{heading} № {app_id}</b>\n"
     "{created_at} · источник: {source}\n\n"
     "<b>Имя:</b> {name}\n"
     "<b>Контакт:</b> {contact}\n"
@@ -133,6 +134,8 @@ ADMIN_APPLICATION = (
     "Ник: {username}\n"
     "Имя: {tg_name}"
 )
+ADMIN_HEADING_NEW = "Новая заявка"  # уведомление о только что пришедшей заявке
+ADMIN_HEADING_CARD = "Заявка"  # карточка в админ-панели
 ADMIN_NO_USERNAME = "не задан"
 ADMIN_TAKEN_MARK = "✅ <b>В работе</b> с {taken_at}"
 ADMIN_TAKE_DENIED = "Это действие доступно только администратору."
@@ -151,6 +154,69 @@ ADMIN_DB_MARK_FAILED = (
     "⚠️ Заявка {app_id} сохранена в базу, но отметка о доставке не записана ({error}). "
     "Заявка доставлена вам в сообщении выше."
 )
+
+# «В работу» под уведомлением: статус в базе.
+ADMIN_TAKEN_NOT_IN_DB = (
+    "Отмечено в сообщении. В базе этой заявки нет (её не удалось сохранить) — статус не записан."
+)
+ADMIN_TAKE_NOT_ALLOWED = "Заявка уже в статусе «{status}» — статус меняется в /admin."
+ADMIN_DB_STATUS_FAILED = (
+    "⚠️ Заявка {app_id}: статус «{status}» не записан в базу ({error}). Отметка в сообщении стоит."
+)
+DB_UNAVAILABLE_REASON = "база недоступна"
+
+# --- админ-панель (/admin) ---
+PANEL_HOME = "<b>Заявки</b>\nВыберите раздел."
+PANEL_DB_UNAVAILABLE = "База данных недоступна, список показать не могу."
+PANEL_DB_ERROR = "Не получилось прочитать базу данных ({error}). Попробуйте ещё раз позже."
+PANEL_BTN_NEW = "🆕 Новые ({count})"
+PANEL_BTN_IN_WORK = "🔧 В работе ({count})"
+PANEL_BTN_DONE = "✅ Выполненные ({count})"
+PANEL_BTN_CANCELLED = "🚫 Отменённые ({count})"
+PANEL_BTN_ALL = "📋 Все"
+PANEL_BTN_PREV = "‹ назад"
+PANEL_BTN_NEXT = "вперёд ›"
+PANEL_BTN_HOME = "⌂ В панель"
+PANEL_BTN_BACK_TO_LIST = "‹ К списку"
+PANEL_BTN_TAKE = "🔧 В работу"
+PANEL_BTN_DONE_ACTION = "✅ Завершить"
+PANEL_BTN_CANCEL_ACTION = "🚫 Отменить"
+PANEL_BTN_REOPEN = "↩️ Вернуть в новые"
+PANEL_BTN_CONFIRM_CANCEL = "Да, отменить"
+PANEL_BTN_KEEP = "Нет"
+PANEL_LIST_TITLES = {
+    "new": "🆕 Новые",
+    "in_work": "🔧 В работе",
+    "done": "✅ Выполненные",
+    "cancelled": "🚫 Отменённые",
+    "all": "📋 Все заявки",
+}
+PANEL_LIST_HEADER = "<b>{title}</b> — {total}, страница {page} из {pages}"
+PANEL_LIST_EMPTY = "<b>{title}</b>\nЗдесь пока пусто."
+PANEL_LIST_LINE = "{icon} <b>{app_id}</b> · {created_at} · {name} · {project_type}"
+PANEL_CARD_STATUS = "<b>Статус:</b> {icon} {label}"
+PANEL_CARD_TAKEN = "В работе с {taken_at}"
+PANEL_CARD_CLOSED = "Закрыта {closed_at}"
+PANEL_CONFIRM_CANCEL = (
+    "<b>Отменить заявку № {app_id}?</b> Она останется в базе со статусом «Отменена». "
+    "Клиенту ничего не придёт."
+)
+PANEL_NOT_FOUND = "Заявки № {app_id} нет в базе — возможно, её удалили."
+PANEL_STATUS_CHANGED = "Статус: {label}."
+PANEL_STATUS_ALREADY = "Заявка уже в статусе «{label}»."
+PANEL_STATUS_NOT_ALLOWED = "Так изменить статус нельзя: заявка сейчас «{label}»."
+PANEL_STATUS_FAILED = "Статус не записан: ошибка базы данных ({error})."
+
+
+def applications_count(count: int) -> str:
+    """«1 заявка», «2 заявки», «5 заявок»."""
+    if count % 10 == 1 and count % 100 != 11:
+        word = "заявка"
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = "заявки"
+    else:
+        word = "заявок"
+    return f"{count} {word}"
 
 
 def chars(count: int) -> str:

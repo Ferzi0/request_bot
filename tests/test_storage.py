@@ -23,7 +23,7 @@ from aiogram.types import User
 from bot import texts
 from bot.app import create_dispatcher
 from bot.config import PROJECT_ROOT, ConfigError, Settings, load_settings
-from bot.models import Applicant, Application, ProjectType, Source
+from bot.models import Applicant, Application, ApplicationStatus, ProjectType, Source
 from bot.services import sqlite_repository
 from bot.services.sqlite_repository import ApplicationIdTakenError, SchemaError, SqliteRepository
 from tests.conftest import ADMIN_ID, CLIENT_ID, FAKE_TOKEN, FakeUser, MockSession
@@ -101,6 +101,9 @@ async def test_creates_schema_on_empty_database(repo: SqliteRepository, db_path:
         "applicant_username",
         "applicant_full_name",
         "delivered_at",
+        "status",
+        "taken_at",
+        "closed_at",
     ]
     assert {"applications_created_at_idx", "applications_applicant_user_id_idx"} <= indexes
     assert "-- Номер заявки" in ddl[0]  # комментарии видны в DDL (DBeaver)
@@ -215,8 +218,11 @@ async def test_add_and_get_roundtrip(repo: SqliteRepository, db_path: Path) -> N
     app = make_app()
     await repo.add(app)
     loaded = await repo.get(app.id)
+    assert loaded is not None and loaded.status is ApplicationStatus.NEW
     # Время хранится с точностью до секунды — так читаемее в DBeaver.
-    assert loaded == app.model_copy(update={"created_at": app.created_at.replace(microsecond=0)})
+    assert loaded.application == app.model_copy(
+        update={"created_at": app.created_at.replace(microsecond=0)}
+    )
     assert await repo.get("000000-0000") is None
 
     (row,) = rows(db_path)
@@ -233,6 +239,9 @@ async def test_add_and_get_roundtrip(repo: SqliteRepository, db_path: Path) -> N
         "applicant_username": "anna_k",
         "applicant_full_name": "Анна К",
         "delivered_at": None,
+        "status": "new",
+        "taken_at": None,
+        "closed_at": None,
     }
 
 
@@ -251,7 +260,7 @@ async def test_username_may_be_missing(repo: SqliteRepository) -> None:
     app = make_app(applicant=Applicant(user_id=1, username=None, full_name="Без ника"))
     await repo.add(app)
     loaded = await repo.get(app.id)
-    assert loaded is not None and loaded.applicant.username is None
+    assert loaded is not None and loaded.application.applicant.username is None
 
 
 async def test_same_id_does_not_duplicate(repo: SqliteRepository, db_path: Path) -> None:
@@ -296,7 +305,8 @@ async def test_values_are_parameterized(
     await repo.add(app)
     loaded = await repo.get(app.id)
     assert loaded is not None
-    assert (loaded.name, loaded.task, loaded.contact) == (name, task, contact)
+    stored = loaded.application
+    assert (stored.name, stored.task, stored.contact) == (name, task, contact)
     assert len(rows(db_path)) == 1  # таблица на месте, лишнего не удалено
 
 

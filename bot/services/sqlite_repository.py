@@ -25,8 +25,16 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from bot.models import Applicant, Application, ProjectType, Source
-from bot.services.storage import DatabaseStatus
+from bot.models import (
+    Applicant,
+    Application,
+    ApplicationRecord,
+    ApplicationStatus,
+    ProjectType,
+    Source,
+    can_transition,
+)
+from bot.services.storage import DatabaseStatus, StatusChange, StatusOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +98,29 @@ MIGRATIONS: tuple[str, ...] = (
         CHECK (delivered_at IS NULL OR delivered_at GLOB
             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z');
     """,
+    # --- версия 3: статусы заявки (работа администратора) ---
+    # DEFAULT 'new' — все уже сохранённые заявки становятся новыми (решение заказчика).
+    # NOT NULL с константным DEFAULT в ADD COLUMN SQLite разрешает.
+    # Один составной индекс (status, created_at) закрывает и фильтр по статусу,
+    # и сортировку «новые сверху» в списке панели; отдельный индекс по status
+    # был бы его префиксом, то есть лишним.
+    """
+    ALTER TABLE applications ADD COLUMN status TEXT NOT NULL DEFAULT 'new'
+        -- Статус: new — новая, in_work — в работе, done — выполнена,
+        -- cancelled — отменена (строка не удаляется). Меняется кнопками бота.
+        CHECK (status IN ('new', 'in_work', 'done', 'cancelled'));
+    ALTER TABLE applications ADD COLUMN taken_at TEXT
+        -- Когда взята в работу (первое нажатие «В работу»), UTC; NULL — ещё новая.
+        CHECK (taken_at IS NULL OR taken_at GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z');
+    ALTER TABLE applications ADD COLUMN closed_at TEXT
+        -- Когда закрыта (выполнена или отменена), UTC; NULL — не закрыта.
+        CHECK (closed_at IS NULL OR closed_at GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z');
+
+    -- Для списков админ-панели: заявки одного статуса, новые сверху.
+    CREATE INDEX applications_status_created_at_idx ON applications (status, created_at);
+    """,
 )
 
 # ON CONFLICT: повтор «Отправить» после сбоя доставки приходит с тем же номером.
@@ -124,11 +155,43 @@ SET delivered_at = COALESCE(delivered_at, :delivered_at)
 WHERE id = :id
 """
 
-_SELECT_ONE = """
-SELECT id, created_at, source, name, contact, project_type, task,
-       applicant_user_id, applicant_username, applicant_full_name
-FROM applications
-WHERE id = ?
+_COLUMNS = """
+    id, created_at, source, name, contact, project_type, task,
+    applicant_user_id, applicant_username, applicant_full_name,
+    delivered_at, status, taken_at, closed_at
+"""
+
+_SELECT_ONE = f"SELECT {_COLUMNS} FROM applications WHERE id = ?"  # noqa: S608 — константа
+
+# Два отдельных запроса, а не «WHERE (:status IS NULL OR status = :status)»:
+# с OR SQLite не может использовать индекс (status, created_at).
+_LIST_ALL = f"""
+SELECT {_COLUMNS} FROM applications
+ORDER BY created_at DESC, id DESC
+LIMIT :limit OFFSET :offset
+"""  # noqa: S608 — подставляется только константа _COLUMNS
+_LIST_BY_STATUS = f"""
+SELECT {_COLUMNS} FROM applications
+WHERE status = :status
+ORDER BY created_at DESC, id DESC
+LIMIT :limit OFFSET :offset
+"""  # noqa: S608 — подставляется только константа _COLUMNS
+
+# Смена статуса. «WHERE status = :expected» — защита от гонки: если между чтением
+# и записью статус успел поменяться (другое нажатие, правка в DBeaver), UPDATE
+# не тронет строку (rowcount = 0) и решение принимается заново по свежему статусу.
+# Время: в работу — taken_at = сейчас; закрытие — closed_at = сейчас (taken_at
+# остаётся); «Вернуть в новые» — оба сбрасываются.
+_SET_STATUS = """
+UPDATE applications SET
+    status = :status,
+    taken_at = CASE :status
+        WHEN 'new' THEN NULL
+        WHEN 'in_work' THEN :now
+        ELSE taken_at
+    END,
+    closed_at = CASE WHEN :status IN ('done', 'cancelled') THEN :now ELSE NULL END
+WHERE id = :id AND status = :expected
 """
 
 
@@ -196,6 +259,10 @@ class SqliteRepository:
 
     # ---------- операции ----------
 
+    @property
+    def available(self) -> bool:
+        return True
+
     async def add(self, application: Application) -> None:
         await self._run(self._add_sync, application)
 
@@ -210,9 +277,22 @@ class SqliteRepository:
         """Время доставки по номеру (None — не доставлена). Для тестов и отладки."""
         return await self._run(self._get_delivered_at_sync, app_id)
 
-    async def get(self, app_id: str) -> Application | None:
-        """Заявка по номеру. Боту не нужна (он только пишет) — для тестов и отладки."""
+    async def get(self, app_id: str) -> ApplicationRecord | None:
+        """Заявка по номеру вместе со статусом (карточка в админ-панели)."""
         return await self._run(self._get_sync, app_id)
+
+    async def list_by_status(
+        self, status: ApplicationStatus | None, limit: int, offset: int
+    ) -> list[ApplicationRecord]:
+        return await self._run(self._list_sync, status, limit, offset)
+
+    async def count_by_status(self) -> dict[ApplicationStatus, int]:
+        return await self._run(self._count_sync)
+
+    async def set_status(
+        self, app_id: str, status: ApplicationStatus, now: datetime
+    ) -> StatusChange:
+        return await self._run(self._set_status_sync, app_id, status, now)
 
     # ---------- синхронная часть: выполняется только в потоке базы ----------
 
@@ -269,13 +349,52 @@ class SqliteRepository:
     def _get_delivered_at_sync(self, app_id: str) -> datetime | None:
         sql = "SELECT delivered_at FROM applications WHERE id = ?"
         row = self._connection().execute(sql, (app_id,)).fetchone()
-        if row is None or row["delivered_at"] is None:
-            return None
-        return datetime.strptime(row["delivered_at"], TIME_FORMAT).replace(tzinfo=UTC)
+        return None if row is None else _parse_time(row["delivered_at"])
 
-    def _get_sync(self, app_id: str) -> Application | None:
+    def _get_sync(self, app_id: str) -> ApplicationRecord | None:
         row = self._connection().execute(_SELECT_ONE, (app_id,)).fetchone()
-        return None if row is None else _from_row(row)
+        return None if row is None else _record_from_row(row)
+
+    def _list_sync(
+        self, status: ApplicationStatus | None, limit: int, offset: int
+    ) -> list[ApplicationRecord]:
+        if limit < 0 or offset < 0:
+            raise ValueError("limit and offset must be >= 0")
+        params: dict[str, object] = {"limit": limit, "offset": offset}
+        if status is None:
+            cursor = self._connection().execute(_LIST_ALL, params)
+        else:
+            cursor = self._connection().execute(_LIST_BY_STATUS, {**params, "status": status})
+        return [_record_from_row(row) for row in cursor]
+
+    def _count_sync(self) -> dict[ApplicationStatus, int]:
+        sql = "SELECT status, count(*) AS n FROM applications GROUP BY status"
+        counts = dict.fromkeys(ApplicationStatus, 0)
+        for row in self._connection().execute(sql):
+            counts[ApplicationStatus(row["status"])] = int(row["n"])
+        return counts
+
+    def _set_status_sync(
+        self, app_id: str, status: ApplicationStatus, now: datetime
+    ) -> StatusChange:
+        params = {"id": app_id, "status": status.value, "now": _utc_text(now)}
+        # Цикл — на случай, если статус поменяли извне между чтением и UPDATE.
+        # Больше пары оборотов не бывает: каждый оборот видит уже свежий статус.
+        for _ in range(3):
+            record = self._get_sync(app_id)
+            if record is None:
+                return StatusChange(StatusOutcome.NOT_FOUND)
+            if record.status is status:
+                # Повтор того же перехода: время не трогаем, это не ошибка.
+                return StatusChange(StatusOutcome.ALREADY, record)
+            if not can_transition(record.status, status):
+                return StatusChange(StatusOutcome.NOT_ALLOWED, record)
+            cursor = self._connection().execute(
+                _SET_STATUS, {**params, "expected": record.status.value}
+            )
+            if cursor.rowcount == 1:
+                return StatusChange(StatusOutcome.CHANGED, self._get_sync(app_id))
+        raise RuntimeError(f"Заявка {app_id}: статус меняется слишком часто")
 
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -360,4 +479,18 @@ def _from_row(row: sqlite3.Row) -> Application:
             username=row["applicant_username"],
             full_name=row["applicant_full_name"],
         ),
+    )
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    return None if value is None else datetime.strptime(value, TIME_FORMAT).replace(tzinfo=UTC)
+
+
+def _record_from_row(row: sqlite3.Row) -> ApplicationRecord:
+    return ApplicationRecord(
+        application=_from_row(row),
+        status=ApplicationStatus(row["status"]),
+        delivered_at=_parse_time(row["delivered_at"]),
+        taken_at=_parse_time(row["taken_at"]),
+        closed_at=_parse_time(row["closed_at"]),
     )
