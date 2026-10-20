@@ -69,6 +69,12 @@ class MockSession(BaseSession):
         self.hook: Hook | None = None
         # Задержка ответа на запросы к этому чату — чтобы апдейты «пересеклись» во времени.
         self.slow_chat: int | None = None
+        # message_id, который «Telegram» выдал каждому отправленному сообщению (по id()
+        # объекта SendMessage): нажатие кнопки под ним приходит с тем же id, как в жизни.
+        self.message_ids: dict[int, int] = {}
+        # Ссылки на эти SendMessage: пока объект жив, его id() не достанется другому
+        # (после clear() иначе новый объект мог бы унаследовать чужой message_id).
+        self._issued: list[SendMessage] = []
 
     async def close(self) -> None:
         pass
@@ -90,8 +96,11 @@ class MockSession(BaseSession):
             if result is not None:
                 return result
         if isinstance(method, SendMessage):
+            message_id = next(self._ids)
+            self.message_ids[id(method)] = message_id
+            self._issued.append(method)
             return Message(
-                message_id=next(self._ids),
+                message_id=message_id,
                 date=datetime.now(UTC),
                 chat=Chat(id=int(method.chat_id), type="private"),
                 from_user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
@@ -175,7 +184,7 @@ class FakeUser:
         history = self.session.sent(self.chat.id)
         source = on or (history[-1] if history else None)
         bot_message = message or Message(
-            message_id=1,
+            message_id=self.session.message_ids.get(id(source), 1) if source else 1,
             date=datetime.now(UTC),
             chat=self.chat,
             from_user=User(id=BOT_ID, is_bot=True, first_name="Bot"),

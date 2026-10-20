@@ -3,6 +3,8 @@
 Панель видит только администратор (ADMIN_ID). Для остальных /admin выглядит
 как любая неизвестная команда — существование панели не раскрываем.
 Все экраны — правка одного и того же сообщения, чтобы не засорять чат.
+Повторный /admin удаляет прежнюю панель и саму команду: в чате остаётся одна
+актуальная панель (её message_id помнит PanelMessages, в памяти).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from bot.services.formatting import (
     format_panel_confirm_cancel,
     format_panel_list,
 )
+from bot.services.panel_state import PanelMessages
 from bot.services.storage import ApplicationRepository, StatusOutcome
 
 logger = logging.getLogger(__name__)
@@ -56,14 +59,26 @@ class _StorageFailedError(Exception):
 
 
 async def cmd_admin(
-    message: Message, settings: Settings, repository: ApplicationRepository
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    repository: ApplicationRepository,
+    panel_messages: PanelMessages,
 ) -> None:
     if message.from_user is None or message.from_user.id != settings.admin_id:
         # Ровно тот же ответ, что на любую неизвестную команду: панель не «светится».
         await message.answer(texts.UNKNOWN_COMMAND)
         return
+    chat_id = message.chat.id
+    # Удаляем только в личном чате администратора (middleware пропускает лишь личные
+    # чаты, а там chat.id = user id) — сообщения чужих чатов не трогаем никогда.
+    if chat_id == settings.admin_id:
+        if (old := panel_messages.get(chat_id)) is not None:
+            await _delete_quietly(bot, chat_id, old, "старая панель")
+        await _delete_quietly(bot, chat_id, message.message_id, "команда /admin")
     text, markup = await _home_screen(repository)
-    await message.answer(text, reply_markup=markup)
+    sent = await message.answer(text, reply_markup=markup)
+    _remember(panel_messages, settings, chat_id, sent.message_id)
 
 
 async def cb_panel(
@@ -73,6 +88,7 @@ async def cb_panel(
     settings: Settings,
     repository: ApplicationRepository,
     client_notifier: ClientNotifier,
+    panel_messages: PanelMessages,
 ) -> None:
     # Права — по нажавшему, а не по чату: кнопку мог нажать кто угодно, кому
     # попало это сообщение. Посторонний получает нейтральный ответ, сообщение
@@ -87,6 +103,15 @@ async def cb_panel(
             callback_data.i,
         )
         await callback.answer(texts.STALE_BUTTON)
+        return
+
+    if _is_replaced_panel(callback, panel_messages):
+        # Кнопка панели, которую уже заменил повторный /admin (нажата до удаления или
+        # из кэша клиента): не оживляем её, а убираем — актуальна только новая.
+        await callback.answer(texts.STALE_BUTTON)
+        if callback.message is not None:
+            chat_id, message_id = callback.message.chat.id, callback.message.message_id
+            await _delete_quietly(bot, chat_id, message_id, "заменённая панель")
         return
 
     data = callback_data
@@ -104,7 +129,10 @@ async def cb_panel(
         case PanelAction.SET:
             popup, screen, newly_taken = await _set_status(repository, settings, data)
     await callback.answer(popup)
-    await _show(bot, callback, screen)
+    shown_id = await _show(bot, callback, screen)
+    if shown_id is not None and callback.message is not None:
+        # Правка — тот же id; экран новым сообщением (старое не правится) — новый id.
+        _remember(panel_messages, settings, callback.message.chat.id, shown_id)
     if newly_taken:
         # Последним: сбой отправки клиенту не должен мешать экрану и ответу на нажатие.
         await client_notifier.application_taken(bot, repository, data.i)
@@ -250,42 +278,72 @@ def _storage_error_screen(where: str, exc: Exception) -> Screen:
     return texts.PANEL_DB_ERROR.format(error=error), panel_home_only_keyboard()
 
 
-async def _show(bot: Bot, callback: CallbackQuery, screen: Screen) -> None:
-    """Показывает экран правкой того же сообщения, а если править нельзя — новым."""
+async def _show(bot: Bot, callback: CallbackQuery, screen: Screen) -> int | None:
+    """Показывает экран правкой того же сообщения, а если править нельзя — новым.
+
+    Возвращает message_id, где теперь панель (None — сообщения нет совсем).
+    """
     text, markup = screen
     message = callback.message
     if not isinstance(message, Message):
         # InaccessibleMessage: Telegram не отдал сообщение (удалено или недоступно
         # боту) — править нечего, шлём экран новым сообщением.
         if message is not None:
-            await _send_new(bot, message.chat.id, screen)
-        return
+            return await _send_new(bot, message.chat.id, screen)
+        return None
     try:
         await message.edit_text(text, reply_markup=markup)
     except TelegramBadRequest as exc:
         if _NOT_MODIFIED in exc.message:
-            return  # нажали ту же кнопку — экран уже такой, это не ошибка
+            return message.message_id  # нажали ту же кнопку — экран уже такой
         if _PRIVACY_RESTRICTED in exc.message:
             # Кнопку tg://user Telegram не принимает (приватность клиента) — без неё.
             await message.edit_text(text, reply_markup=_without_tg_links(markup))
-            return
+            return message.message_id
         if any(reason in exc.message for reason in _CANT_EDIT):
             # Сообщение успели удалить или Telegram отказывается его править:
             # статус к этому моменту уже записан, поэтому экран — новым сообщением,
             # а не «Что-то пошло не так».
-            await _send_new(bot, message.chat.id, screen)
-            return
+            return await _send_new(bot, message.chat.id, screen)
         raise
+    return message.message_id
 
 
-async def _send_new(bot: Bot, chat_id: int, screen: Screen) -> None:
+async def _send_new(bot: Bot, chat_id: int, screen: Screen) -> int:
     text, markup = screen
     try:
-        await bot.send_message(chat_id, text, reply_markup=markup)
+        sent = await bot.send_message(chat_id, text, reply_markup=markup)
     except TelegramBadRequest as exc:
         if _PRIVACY_RESTRICTED not in exc.message:
             raise
-        await bot.send_message(chat_id, text, reply_markup=_without_tg_links(markup))
+        sent = await bot.send_message(chat_id, text, reply_markup=_without_tg_links(markup))
+    return sent.message_id
+
+
+def _remember(panel_messages: PanelMessages, settings: Settings, chat_id: int, msg: int) -> None:
+    if chat_id == settings.admin_id:  # только чат администратора
+        panel_messages.set(chat_id, msg)
+
+
+def _is_replaced_panel(callback: CallbackQuery, panel_messages: PanelMessages) -> bool:
+    """Кнопка нажата на панели, которая уже не текущая.
+
+    Если бот текущую панель не помнит (после перезапуска), любая панель считается
+    рабочей и становится текущей — иначе после рестарта ею нельзя было бы пользоваться.
+    """
+    if callback.message is None:
+        return False
+    current = panel_messages.get(callback.message.chat.id)
+    return current is not None and callback.message.message_id != current
+
+
+async def _delete_quietly(bot: Bot, chat_id: int, message_id: int, what: str) -> None:
+    """Удаление — уборка, а не суть: любой сбой (уже удалено, нельзя удалить, сеть)
+    только в лог (класс ошибки), панель всё равно открывается."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception as exc:
+        logger.info("panel: не удалось удалить (%s): %s", what, type(exc).__name__)
 
 
 def _without_tg_links(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
