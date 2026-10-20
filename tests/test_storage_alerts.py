@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
-from aiogram.methods import SendMessage, TelegramMethod
+from aiogram.methods import SendMessage, SendPhoto, TelegramMethod
 from aiogram.types import User
 
 from bot import texts
@@ -285,14 +285,20 @@ async def test_db_work_is_done_even_if_client_blocked_bot(
     client = new_client(dispatcher(make_settings(tmp_path), repository), bot, session)
     await fill_until_summary(client, session)
 
-    def hook(method: TelegramMethod) -> None:
-        if isinstance(method, SendMessage) and method.text.startswith(ACCEPTED):
+    blocked: list[TelegramMethod] = []  # type: ignore[type-arg]
+
+    def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
+        # «Заявка принята» — фото с подписью, а при сбое фото — текст: блокируем оба.
+        text = method.caption if isinstance(method, SendPhoto) else getattr(method, "text", None)
+        if isinstance(method, SendMessage | SendPhoto) and (text or "").startswith(ACCEPTED):
+            blocked.append(method)
             raise TelegramForbiddenError(method, "Forbidden: bot was blocked by the user")
         return None
 
     session.hook = hook
     with contextlib.suppress(TelegramForbiddenError):
         await client.press(SUBMIT)
+    assert blocked, "ответ клиенту не был заблокирован — тест ничего не проверил"
     assert len(alerts(session)) == 1  # уведомление о сбое отметки ушло до ответа клиенту
 
 

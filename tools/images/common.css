@@ -1,0 +1,47 @@
+/* Общие стили картинок бота: палитра и шрифты сайта ../ferz-site (осень: бордо + старое золото).
+   Числа палитры — из ../ferz-site/css/main.css, блок «3. Сезон» (brand h=14 c=0.165, accent h=78 c=0.118).
+   Шрифты не копируются: берутся из сайта по относительному пути (OFL 1.1, лицензии там же). */
+@font-face {
+  font-family: "Ferz Display";
+  src: url("../../../ferz-site/assets/fonts/ferz-display-latin.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00A0-00FF, U+2013-2014, U+2018-201E, U+2026, U+2116;
+}
+@font-face {
+  font-family: "Ferz Display";
+  src: url("../../../ferz-site/assets/fonts/ferz-display-cyr.woff2") format("woff2");
+  unicode-range: U+0401, U+0410-044F, U+0451;
+  size-adjust: 107%;
+}
+@font-face {
+  font-family: "Ferz Text";
+  src: url("../../../ferz-site/assets/fonts/ferz-text.woff2") format("woff2");
+  font-weight: 400 700;
+}
+:root {
+  --brand-500: oklch(0.58 0.165 14);
+  --brand-700: oklch(0.42 0.155 14);
+  --brand-900: oklch(0.28 0.102 14);
+  --brand-950: oklch(0.2 0.069 14);
+  --accent-300: oklch(0.87 0.094 78);
+  --accent-400: oklch(0.81 0.118 78);
+  --paper: oklch(0.97 0.01 78);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 1280px; height: 720px; overflow: hidden; }
+body {
+  position: relative;
+  font-family: "Ferz Text", Arial, sans-serif;
+  color: var(--paper);
+  /* Шахматная доска (клетка 64 px) поверх бордо и мягкий свет, как на og-image сайта. */
+  background:
+    radial-gradient(ellipse 55% 75% at 66% 45%, color-mix(in oklch, var(--brand-500) 38%, transparent), transparent 70%),
+    conic-gradient(color-mix(in oklch, var(--brand-500) 16%, transparent) 25%, transparent 0 50%,
+                   color-mix(in oklch, var(--brand-500) 16%, transparent) 0 75%, transparent 0) 0 0 / 128px 128px,
+    linear-gradient(135deg, var(--brand-900), var(--brand-950));
+}
+.display { font-family: "Ferz Display", Impact, sans-serif; font-weight: 400; line-height: 0.9; }
+.chip {
+  display: inline-block; padding: 16px 28px; border-radius: 14px;
+  border: 2px solid color-mix(in oklch, var(--paper) 55%, transparent);
+  font-size: 34px; font-weight: 500;
+}

@@ -13,7 +13,7 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramRetryAfter,
 )
-from aiogram.methods import EditMessageText, SendMessage, TelegramMethod
+from aiogram.methods import EditMessageText, SendMessage, SendPhoto, TelegramMethod
 from aiogram.types import Chat, Message, User
 
 from bot import texts
@@ -440,7 +440,9 @@ async def test_blocked_bot_is_not_logged_as_error(
     client: FakeUser, session: MockSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     def hook(method: TelegramMethod) -> None:
-        if isinstance(method, SendMessage) and int(method.chat_id) == CLIENT_ID:
+        # Заблокированному боту Telegram не даёт отправить ничего: ни текст, ни фото.
+        to_client = isinstance(method, SendMessage | SendPhoto)
+        if to_client and int(method.chat_id) == CLIENT_ID:
             raise TelegramForbiddenError(method, "Forbidden: bot was blocked by the user")
         return None
 

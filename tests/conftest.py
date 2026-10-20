@@ -19,12 +19,14 @@ from typing import Any, ClassVar
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
     AnswerCallbackQuery,
     EditMessageReplyMarkup,
     EditMessageText,
     GetMe,
     SendMessage,
+    SendPhoto,
     TelegramMethod,
 )
 from aiogram.types import (
@@ -33,6 +35,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
     MessageEntity,
+    PhotoSize,
     Update,
     User,
 )
@@ -74,7 +77,14 @@ class MockSession(BaseSession):
         self.message_ids: dict[int, int] = {}
         # Ссылки на эти SendMessage: пока объект жив, его id() не достанется другому
         # (после clear() иначе новый объект мог бы унаследовать чужой message_id).
-        self._issued: list[SendMessage] = []
+        self._issued: list[TelegramMethod[Any]] = []
+        # Фото: (чат, message_id) — правка ТЕКСТА такого сообщения в Telegram падает
+        # («there is no text in the message to edit»), мок ведёт себя так же.
+        self.photo_messages: set[tuple[int, int]] = set()
+        # Для проверок фото видно как текстовое сообщение с подписью (sent(), last_sent()):
+        # id(SendPhoto) → его «текстовый вид», id(вида) → это фото.
+        self._photo_views: dict[int, SendMessage] = {}
+        self._view_ids: set[int] = set()
 
     async def close(self) -> None:
         pass
@@ -107,16 +117,70 @@ class MockSession(BaseSession):
                 text=method.text,
                 reply_markup=method.reply_markup,
             )
+        if isinstance(method, SendPhoto):
+            return self._photo_reply(method)
+        if (
+            isinstance(method, EditMessageText)
+            and method.chat_id is not None
+            and (int(method.chat_id), method.message_id) in self.photo_messages
+        ):
+            raise TelegramBadRequest(method, "Bad Request: there is no text in the message to edit")
         if isinstance(method, GetMe):
             return User(id=BOT_ID, is_bot=True, first_name="Bot", username="ferz_test_bot")
         return True
 
+    def _photo_reply(self, method: SendPhoto) -> Message:
+        message_id = next(self._ids)
+        chat_id = int(method.chat_id)
+        view = SendMessage(
+            chat_id=chat_id, text=method.caption or "", reply_markup=method.reply_markup
+        )
+        self._photo_views[id(method)] = view
+        self._view_ids.add(id(view))
+        self.message_ids[id(view)] = message_id
+        self._issued += [method, view]
+        self.photo_messages.add((chat_id, message_id))
+        # Как Telegram: file_id, по которому то же фото отправляется без загрузки.
+        photo = method.photo
+        file_id = photo if isinstance(photo, str) else f"file-id-{getattr(photo, 'filename', 'x')}"
+        return Message(
+            message_id=message_id,
+            date=datetime.now(UTC),
+            chat=Chat(id=chat_id, type="private"),
+            from_user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
+            # Как Telegram: несколько размеров по возрастанию; оригинал — последний,
+            # у уменьшенных другие file_id (по ним ушла бы уменьшенная картинка).
+            photo=[
+                PhotoSize(file_id=f"{file_id}-s", file_unique_id="s", width=320, height=180),
+                PhotoSize(file_id=file_id, file_unique_id="u", width=1280, height=720),
+            ],
+            caption=method.caption,
+            reply_markup=method.reply_markup,
+        )
+
+    def is_photo(self, method: SendMessage) -> bool:
+        """Этот «текстовый вид» на самом деле фото с подписью."""
+        return id(method) in self._view_ids
+
     # --- удобные выборки для проверок ---
     def sent(self, chat_id: int | None = None) -> list[SendMessage]:
+        """Всё, что бот отправил в чат: текстом или фото (тогда text = подпись)."""
+        result: list[SendMessage] = []
+        for m in self.requests:
+            view: SendMessage | None = None
+            if isinstance(m, SendMessage):
+                view = m
+            elif isinstance(m, SendPhoto) and id(m) in self._photo_views:
+                view = self._photo_views[id(m)]
+            if view is not None and (chat_id is None or int(view.chat_id) == chat_id):
+                result.append(view)
+        return result
+
+    def photos(self, chat_id: int | None = None) -> list[SendPhoto]:
         return [
             m
             for m in self.requests
-            if isinstance(m, SendMessage) and (chat_id is None or int(m.chat_id) == chat_id)
+            if isinstance(m, SendPhoto) and (chat_id is None or int(m.chat_id) == chat_id)
         ]
 
     def last_sent(self, chat_id: int) -> SendMessage:
@@ -183,13 +247,18 @@ class FakeUser:
         """
         history = self.session.sent(self.chat.id)
         source = on or (history[-1] if history else None)
+        content: dict[str, Any] = {"text": source.text if source else "…"}
+        if source is not None and self.session.is_photo(source):
+            # Кнопка под фото: Telegram пришлёт сообщение с photo и caption, без text.
+            size = PhotoSize(file_id="f", file_unique_id="u", width=1280, height=720)
+            content = {"photo": [size], "caption": source.text}
         bot_message = message or Message(
             message_id=self.session.message_ids.get(id(source), 1) if source else 1,
             date=datetime.now(UTC),
             chat=self.chat,
             from_user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
-            text=source.text if source else "…",
             reply_markup=source.reply_markup if source else None,
+            **content,
         )
         callback = CallbackQuery(
             id=str(next(self._update_ids)),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -19,8 +21,22 @@ from bot.callbacks import (
 from bot.models import ALLOWED_TRANSITIONS, ApplicationRecord, ApplicationStatus, ProjectType
 
 
-def _button(text: str, action: FormAction) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=FormCallback(action=action).pack())
+class ButtonStyle(StrEnum):
+    """Цвет кнопки (поле style в Bot API). Других цветов Telegram не даёт: только эти
+    три, а старые клиенты Telegram стиль не показывают — кнопка просто обычная.
+    Стиль — только у главного действия экрана, чтобы цвет что-то значил."""
+
+    PRIMARY = "primary"  # синий: основное рабочее действие («В работу»)
+    SUCCESS = "success"  # зелёный: согласие, отправка, завершение
+    DANGER = "danger"  # красный: отмена заявки
+
+
+def _button(
+    text: str, action: FormAction, style: ButtonStyle | None = None
+) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=text, callback_data=FormCallback(action=action).pack(), style=style
+    )
 
 
 def _cancel_row() -> list[InlineKeyboardButton]:
@@ -28,7 +44,8 @@ def _cancel_row() -> list[InlineKeyboardButton]:
 
 
 def apply_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_button(texts.BTN_APPLY, FormAction.APPLY)]])
+    button = _button(texts.BTN_APPLY, FormAction.APPLY, ButtonStyle.SUCCESS)
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
@@ -66,7 +83,7 @@ def consent_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _button(texts.BTN_AGREE, FormAction.AGREE),
+                _button(texts.BTN_AGREE, FormAction.AGREE, ButtonStyle.SUCCESS),
                 _button(texts.BTN_CANCEL, FormAction.CANCEL),
             ]
         ]
@@ -76,7 +93,7 @@ def consent_keyboard() -> InlineKeyboardMarkup:
 def confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_button(texts.BTN_SUBMIT, FormAction.SUBMIT)],
+            [_button(texts.BTN_SUBMIT, FormAction.SUBMIT, ButtonStyle.SUCCESS)],
             [
                 _button(texts.BTN_EDIT, FormAction.EDIT),
                 _button(texts.BTN_CANCEL, FormAction.CANCEL),
@@ -112,6 +129,7 @@ def admin_application_keyboard(
                 InlineKeyboardButton(
                     text=texts.BTN_TAKE,
                     callback_data=AdminCallback(action="take", app_id=app_id).pack(),
+                    style=ButtonStyle.PRIMARY,
                 )
             ]
         )
@@ -121,8 +139,10 @@ def admin_application_keyboard(
 # ---------- админ-панель ----------
 
 
-def _panel(text: str, data: PanelCallback) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data.pack())
+def _panel(
+    text: str, data: PanelCallback, style: ButtonStyle | None = None
+) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data.pack(), style=style)
 
 
 def _home_button() -> InlineKeyboardButton:
@@ -191,6 +211,13 @@ _TRANSITION_BUTTONS: dict[ApplicationStatus, str] = {
     ApplicationStatus.CANCELLED: texts.PANEL_BTN_CANCEL_ACTION,
     ApplicationStatus.NEW: texts.PANEL_BTN_REOPEN,
 }
+# Цвета кнопок смены статуса; «Вернуть в новые» — без цвета (не главное действие).
+_TRANSITION_STYLES: dict[ApplicationStatus, ButtonStyle | None] = {
+    ApplicationStatus.IN_WORK: ButtonStyle.PRIMARY,
+    ApplicationStatus.DONE: ButtonStyle.SUCCESS,
+    ApplicationStatus.CANCELLED: ButtonStyle.DANGER,
+    ApplicationStatus.NEW: None,
+}
 
 
 def panel_card_keyboard(
@@ -207,7 +234,7 @@ def panel_card_keyboard(
             PanelAction.ASK_CANCEL if target is ApplicationStatus.CANCELLED else PanelAction.SET
         )
         data = PanelCallback(a=action, f=list_filter, p=page, i=app_id, t=target.value)
-        actions.append(_panel(_TRANSITION_BUTTONS[target], data))
+        actions.append(_panel(_TRANSITION_BUTTONS[target], data, _TRANSITION_STYLES[target]))
     # По одной кнопке в строке: три в ряд Telegram обрезает до «…ить» и «…вые».
     rows.extend([button] for button in actions)
     rows.append(
@@ -228,6 +255,9 @@ def panel_confirm_cancel_keyboard(app_id: str, list_filter: str, page: int) -> I
     no = PanelCallback(a=PanelAction.CARD, f=list_filter, p=page, i=app_id)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_panel(texts.PANEL_BTN_CONFIRM_CANCEL, yes), _panel(texts.PANEL_BTN_KEEP, no)]
+            [
+                _panel(texts.PANEL_BTN_CONFIRM_CANCEL, yes, ButtonStyle.DANGER),
+                _panel(texts.PANEL_BTN_KEEP, no),
+            ]
         ]
     )

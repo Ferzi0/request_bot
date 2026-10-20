@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>accepted</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background-position: center;
+  }
+  .badge {
+    width: 230px; height: 230px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--accent-400);
+    box-shadow: 0 0 0 18px color-mix(in oklch, var(--accent-400) 22%, transparent);
+  }
+  .badge svg { width: 132px; height: 132px; }
+  .title { font-size: 150px; margin-top: 64px; letter-spacing: 1px; }
+  .brand { position: absolute; left: 56px; top: 44px; font-size: 64px; color: var(--accent-400); }
+</style></head>
+<body>
+  <!-- Без номера заявки и сроков: они в подписи к картинке (texts.SENT). Без портрета. -->
+  <div class="display brand">FERZ</div>
+  <div class="badge">
+    <svg viewBox="0 0 24 24" fill="none" stroke="oklch(0.28 0.102 14)" stroke-width="3"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4.5 12.5l5 5 10-11"/>
+    </svg>
+  </div>
+  <div class="display title">ЗАЯВКА ПРИНЯТА</div>
+</body></html>

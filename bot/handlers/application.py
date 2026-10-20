@@ -39,6 +39,7 @@ from bot.keyboards import (
 )
 from bot.models import Applicant, Application, ApplicationDraft, new_application_id
 from bot.services.formatting import format_consent, format_send_failed, format_summary
+from bot.services.media import PhotoSender, Picture
 from bot.services.notifier import AdminNotifier
 from bot.services.rate_limit import SlidingWindowLimiter
 from bot.services.storage import ApplicationRepository
@@ -337,6 +338,7 @@ async def cb_submit(
     limiter: SlidingWindowLimiter,
     repository: ApplicationRepository,
     storage_alerts: StorageAlerts,
+    media: PhotoSender,
 ) -> None:
     # Второе нажатие «Отправить» ждёт в очереди (SimpleEventIsolation), а когда
     # дойдёт, состояние уже сброшено — его перехватит any_callback («неактуальна»).
@@ -382,7 +384,11 @@ async def cb_submit(
             await storage_alerts.mark_failed(bot, app.id, mark_error)
         limiter.hit(user.id)  # считаем только доставленные: сбой не съедает лимит
         await reset_form(state)
-        await callback.message.answer(texts.SENT.format(app_id=app.id))
+        # Подтверждение — только ПОСЛЕ доставки администратору. Сбой картинки сюда
+        # не возвращается: PhotoSender сам отправит тот же текст обычным сообщением.
+        await media.send(
+            bot, callback.message.chat.id, Picture.ACCEPTED, texts.SENT.format(app_id=app.id)
+        )
         return
 
     # Не доставлено: честно говорим и оставляем сводку, чтобы можно было повторить.

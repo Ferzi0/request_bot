@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
@@ -13,6 +13,7 @@ from bot import texts
 from bot.drafts import reset_form
 from bot.keyboards import apply_keyboard
 from bot.models import Source
+from bot.services.media import PhotoSender, Picture
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,16 @@ logger = logging.getLogger(__name__)
 SITE_PAYLOAD = "site"
 
 
-async def cmd_start(message: Message, command: CommandObject, state: FSMContext) -> None:
+async def cmd_start(
+    message: Message, command: CommandObject, state: FSMContext, bot: Bot, media: PhotoSender
+) -> None:
     source = Source.SITE if command.args == SITE_PAYLOAD else Source.BOT
     await reset_form(state, source=source)
     logger.info("start: user=%s source=%s", message.chat.id, source.value)
-    await message.answer(texts.GREETING, reply_markup=apply_keyboard())
+    # Приветствие — картинкой с подписью; не вышло — тем же текстом (см. services/media).
+    await media.send(
+        bot, message.chat.id, Picture.WELCOME, texts.GREETING, reply_markup=apply_keyboard()
+    )
 
 
 def create_router() -> Router:
