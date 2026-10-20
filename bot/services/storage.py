@@ -67,6 +67,19 @@ class ApplicationRepository(Protocol):
         """Атомарно сменить статус по правилам ALLOWED_TRANSITIONS. Повтор безопасен."""
         ...
 
+    async def claim_client_notice(self, app_id: str, now: datetime) -> int | None:
+        """Атомарно поставить метку «клиенту сообщили о работе».
+
+        Возвращает Telegram id клиента, если метку поставил именно этот вызов
+        (заявка в работе, метки ещё не было). None — писать клиенту не нужно:
+        уже сообщали, заявки нет или она не в работе.
+        """
+        ...
+
+    async def release_client_notice(self, app_id: str, claimed_at: datetime) -> None:
+        """Снять свою метку (временный сбой отправки) — следующий раз можно повторить."""
+        ...
+
 
 class NullRepository:
     """Ничего не хранит: заявка живёт только в сообщении администратору."""
@@ -96,6 +109,13 @@ class NullRepository:
         self, app_id: str, status: ApplicationStatus, now: datetime
     ) -> StatusChange:
         return StatusChange(StatusOutcome.NOT_FOUND)
+
+    async def claim_client_notice(self, app_id: str, now: datetime) -> int | None:
+        # Без базы нечем защититься от повторной отправки — клиенту не пишем.
+        return None
+
+    async def release_client_notice(self, app_id: str, claimed_at: datetime) -> None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,6 +20,7 @@ from bot import texts
 from bot.config import Settings
 from bot.handlers import get_routers
 from bot.middlewares import PrivateChatOnlyMiddleware
+from bot.services.client_notifier import ClientNotifier
 from bot.services.formatting import format_database_status
 from bot.services.notifier import AdminNotifier, Sleep
 from bot.services.rate_limit import SlidingWindowLimiter
@@ -72,6 +73,7 @@ def create_dispatcher(
     dp["repository"] = repository or NullRepository()
     dp["database"] = database
     dp["storage_alerts"] = StorageAlerts(settings.admin_id)
+    dp["client_notifier"] = ClientNotifier(settings.admin_id)
 
     private_only = PrivateChatOnlyMiddleware()
     dp.message.outer_middleware(private_only)

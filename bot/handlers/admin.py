@@ -2,7 +2,8 @@
 
 «✅ В работу» отмечает заявку и в сообщении, и в базе (статус in_work). Сообщение —
 главное: его отметка ставится всегда, даже если база недоступна; о сбое базы
-администратор узнаёт отдельным уведомлением (StorageAlerts).
+администратор узнаёт отдельным уведомлением (StorageAlerts). При переходе
+new → in_work клиенту уходит «заявка принята в работу» (services/client_notifier).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from bot import texts
 from bot.callbacks import AdminCallback
 from bot.config import Settings
 from bot.models import ApplicationStatus
+from bot.services.client_notifier import ClientNotifier
 from bot.services.formatting import format_local_time
 from bot.services.storage import ApplicationRepository, StatusOutcome
 from bot.services.storage_alerts import StorageAlerts
@@ -46,6 +48,7 @@ async def cb_take(
     settings: Settings,
     repository: ApplicationRepository,
     storage_alerts: StorageAlerts,
+    client_notifier: ClientNotifier,
 ) -> None:
     # Callback может прислать кто угодно, кто видит кнопку (например, если сообщение
     # переслали). Права проверяем по user id нажавшего, а не по чату.
@@ -71,6 +74,7 @@ async def cb_take(
     taken_at = datetime.now(UTC)
     popup = texts.ADMIN_TAKEN_ALERT
     db_error: str | None = None
+    newly_taken = False  # именно это нажатие перевело заявку new → in_work
     if not repository.available:
         db_error = texts.DB_UNAVAILABLE_REASON
     else:
@@ -81,6 +85,7 @@ async def cb_take(
             logger.error("admin: заявка %r — статус in_work не записан: %s", app_id, db_error)
         else:
             record = change.record
+            newly_taken = change.outcome is StatusOutcome.CHANGED
             if change.outcome is StatusOutcome.NOT_FOUND:
                 # Заявку не удалось сохранить при отправке — честно говорим об этом.
                 popup = texts.ADMIN_TAKEN_NOT_IN_DB
@@ -103,9 +108,14 @@ async def cb_take(
         reply_markup=_without_callback_buttons(callback.message.reply_markup),
     )
     logger.info("admin: заявка %r взята в работу", app_id)
+    if db_error is not None:
+        popup = texts.ADMIN_TAKEN_NO_CLIENT_NOTICE
     await callback.answer(popup)
     if db_error is not None:
         await storage_alerts.status_failed(bot, app_id, ApplicationStatus.IN_WORK, db_error)
+    if newly_taken:
+        # Последним: сбой отправки клиенту не должен мешать отметке и ответу на нажатие.
+        await client_notifier.application_taken(bot, repository, app_id)
 
 
 def create_router() -> Router:

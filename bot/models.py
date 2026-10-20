@@ -183,3 +183,5 @@ class ApplicationRecord(BaseModel):
     # Когда взята в работу (NULL у новой) и когда закрыта (done/cancelled).
     taken_at: datetime | None = None
     closed_at: datetime | None = None
+    # Когда клиенту сообщили «заявка принята в работу» (None — не сообщали).
+    client_notified_at: datetime | None = None

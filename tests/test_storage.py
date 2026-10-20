@@ -26,7 +26,15 @@ from bot.config import PROJECT_ROOT, ConfigError, Settings, load_settings
 from bot.models import Applicant, Application, ApplicationStatus, ProjectType, Source
 from bot.services import sqlite_repository
 from bot.services.sqlite_repository import ApplicationIdTakenError, SchemaError, SqliteRepository
-from tests.conftest import ADMIN_ID, CLIENT_ID, FAKE_TOKEN, FakeUser, MockSession
+from tests.conftest import (
+    ACCEPTED,
+    ADMIN_ID,
+    CLIENT_ID,
+    FAKE_TOKEN,
+    FakeUser,
+    MockSession,
+    app_number,
+)
 from tests.test_delivery import fail_admin_with
 from tests.test_flow import SUBMIT, TASK, fill_until_summary
 
@@ -104,6 +112,7 @@ async def test_creates_schema_on_empty_database(repo: SqliteRepository, db_path:
         "status",
         "taken_at",
         "closed_at",
+        "client_notified_at",
     ]
     assert {"applications_created_at_idx", "applications_applicant_user_id_idx"} <= indexes
     assert "-- Номер заявки" in ddl[0]  # комментарии видны в DDL (DBeaver)
@@ -242,6 +251,7 @@ async def test_add_and_get_roundtrip(repo: SqliteRepository, db_path: Path) -> N
         "status": "new",
         "taken_at": None,
         "closed_at": None,
+        "client_notified_at": None,
     }
 
 
@@ -373,7 +383,7 @@ async def test_submit_writes_row_end_to_end(
         await client.press(SUBMIT)
 
     (row,) = rows(tmp_settings.database_path)
-    number = session.last_sent(CLIENT_ID).text.rsplit(" ", 1)[-1]
+    number = app_number(session.last_sent(CLIENT_ID).text)
     assert row["id"] == number
     assert f"№ {number}" in session.last_sent(ADMIN_ID).text
     assert (row["source"], row["name"], row["contact"], row["project_type"], row["task"]) == (
@@ -405,7 +415,7 @@ async def test_failed_delivery_still_saved_once_after_retry(
         assert len(rows(tmp_settings.database_path)) == 1
         session.hook = None
         await client.press(SUBMIT)
-        assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+        assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
     assert len(rows(tmp_settings.database_path)) == 1
 
 
@@ -419,9 +429,9 @@ async def test_storage_failure_does_not_break_delivery(
 
     application, alert = session.sent(ADMIN_ID)  # сначала заявка, потом предупреждение
     assert TASK in application.text
-    number = session.last_sent(CLIENT_ID).text.rsplit(" ", 1)[-1]
+    number = app_number(session.last_sent(CLIENT_ID).text)
     assert alert.text == texts.ADMIN_DB_SAVE_FAILED.format(app_id=number, error="OperationalError")
-    assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+    assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
 
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(errors) == 1

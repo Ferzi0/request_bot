@@ -6,7 +6,15 @@ from aiogram.types import User
 
 from bot import texts
 from bot.callbacks import EditField, EditFieldCallback, FormAction, FormCallback
-from tests.conftest import ADMIN_ID, CLIENT_ID, FakeUser, MockSession, buttons, callback_of
+from tests.conftest import (
+    ADMIN_ID,
+    CLIENT_ID,
+    FakeUser,
+    MockSession,
+    app_number,
+    buttons,
+    callback_of,
+)
 
 APPLY = FormCallback(action=FormAction.APPLY).pack()
 CANCEL = FormCallback(action=FormAction.CANCEL).pack()
@@ -53,8 +61,8 @@ async def test_happy_path_from_site(client: FakeUser, session: MockSession) -> N
     ]
 
     await client.press(callback_of(session.last_sent(CLIENT_ID), "Лендинг"))
-    assert session.edits()[-1].text == "Тип проекта: Лендинг"
-    assert session.last_sent(CLIENT_ID).text.startswith("Шаг 4 из 5")
+    assert session.edits()[-1].text == texts.PROJECT_TYPE_CHOSEN.format(project_type="Лендинг")
+    assert session.last_sent(CLIENT_ID).text.startswith("<b>Шаг 4 из 5</b>")
 
     await client.send(TASK)
     consent = session.last_sent(CLIENT_ID)
@@ -82,7 +90,7 @@ async def test_happy_path_from_site(client: FakeUser, session: MockSession) -> N
     assert any(b[0] == texts.BTN_TAKE and b[1] for b in admin_buttons)
 
     done = session.last_sent(CLIENT_ID).text
-    assert done.startswith("Заявка принята. Отвечу в течение суток.")
+    assert done == texts.SENT.format(app_id=app_number(done))
 
 
 async def test_source_is_bot_without_deep_link(client: FakeUser, session: MockSession) -> None:

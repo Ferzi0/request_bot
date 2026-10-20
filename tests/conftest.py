@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -45,6 +46,17 @@ BOT_ID = 123456
 FAKE_TOKEN = f"{BOT_ID}:TEST-token_ABCdefGHIjklMNOpqrSTUvwx"
 
 Hook = Callable[[TelegramMethod[Any]], Any]
+
+# Начало ответа клиенту «заявка принята» (texts.SENT) и номер из него.
+ACCEPTED = "✅ <b>Заявка принята</b>"
+_NUMBER_RE = re.compile(r"<code>(\d{6}-[0-9A-F]{4})</code>")
+
+
+def app_number(text: str) -> str:
+    """Номер заявки из ответа клиенту (он внутри <code>…</code>)."""
+    match = _NUMBER_RE.search(text)
+    assert match, f"нет номера заявки в {text!r}"
+    return match.group(1)
 
 
 class MockSession(BaseSession):
@@ -188,6 +200,7 @@ class _TelegramHtml(HTMLParser):
         "code": "code",
         "a": "text_link",
         "i": "italic",
+        "blockquote": "blockquote",
     }
 
     def __init__(self) -> None:

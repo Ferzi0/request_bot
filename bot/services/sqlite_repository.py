@@ -121,6 +121,14 @@ MIGRATIONS: tuple[str, ...] = (
     -- Для списков админ-панели: заявки одного статуса, новые сверху.
     CREATE INDEX applications_status_created_at_idx ON applications (status, created_at);
     """,
+    # --- версия 4: отметка «клиенту сообщили, что заявка взята в работу» ---
+    """
+    ALTER TABLE applications ADD COLUMN client_notified_at TEXT
+        -- Когда клиенту отправлено «заявка принята в работу», UTC; NULL — не сообщали.
+        -- Ставится ДО отправки и только один раз: повторное «В работу» не пишет клиенту.
+        CHECK (client_notified_at IS NULL OR client_notified_at GLOB
+            '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z');
+    """,
 )
 
 # ON CONFLICT: повтор «Отправить» после сбоя доставки приходит с тем же номером.
@@ -158,7 +166,21 @@ WHERE id = :id
 _COLUMNS = """
     id, created_at, source, name, contact, project_type, task,
     applicant_user_id, applicant_username, applicant_full_name,
-    delivered_at, status, taken_at, closed_at
+    delivered_at, status, taken_at, closed_at, client_notified_at
+"""
+
+# Метка «клиенту сообщили» — один атомарный UPDATE: из двух одновременных нажатий
+# метку получит только одно (второе увидит client_notified_at уже не NULL), значит,
+# и сообщение клиенту уйдёт одно. RETURNING сразу отдаёт, кому писать.
+_CLAIM_CLIENT_NOTICE = """
+UPDATE applications SET client_notified_at = :now
+WHERE id = :id AND status = 'in_work' AND client_notified_at IS NULL
+RETURNING applicant_user_id
+"""
+# Снять метку можно только свою (то же время): чужую, поставленную позже, не трогаем.
+_RELEASE_CLIENT_NOTICE = """
+UPDATE applications SET client_notified_at = NULL
+WHERE id = :id AND client_notified_at = :claimed_at
 """
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM applications WHERE id = ?"  # noqa: S608 — константа
@@ -294,6 +316,12 @@ class SqliteRepository:
     ) -> StatusChange:
         return await self._run(self._set_status_sync, app_id, status, now)
 
+    async def claim_client_notice(self, app_id: str, now: datetime) -> int | None:
+        return await self._run(self._claim_sync, app_id, now)
+
+    async def release_client_notice(self, app_id: str, claimed_at: datetime) -> None:
+        await self._run(self._release_sync, app_id, claimed_at)
+
     # ---------- синхронная часть: выполняется только в потоке базы ----------
 
     def _open_sync(self) -> None:
@@ -396,6 +424,15 @@ class SqliteRepository:
                 return StatusChange(StatusOutcome.CHANGED, self._get_sync(app_id))
         raise RuntimeError(f"Заявка {app_id}: статус меняется слишком часто")
 
+    def _claim_sync(self, app_id: str, now: datetime) -> int | None:
+        params = {"id": app_id, "now": _utc_text(now)}
+        row = self._connection().execute(_CLAIM_CLIENT_NOTICE, params).fetchone()
+        return None if row is None else int(row["applicant_user_id"])
+
+    def _release_sync(self, app_id: str, claimed_at: datetime) -> None:
+        params = {"id": app_id, "claimed_at": _utc_text(claimed_at)}
+        self._connection().execute(_RELEASE_CLIENT_NOTICE, params)
+
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
             raise RuntimeError("SqliteRepository не открыт: вызовите open()")
@@ -493,4 +530,5 @@ def _record_from_row(row: sqlite3.Row) -> ApplicationRecord:
         delivered_at=_parse_time(row["delivered_at"]),
         taken_at=_parse_time(row["taken_at"]),
         closed_at=_parse_time(row["closed_at"]),
+        client_notified_at=_parse_time(row["client_notified_at"]),
     )

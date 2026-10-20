@@ -27,7 +27,7 @@ from bot.services import sqlite_repository
 from bot.services.sqlite_repository import SqliteRepository
 from bot.services.storage import DatabaseStatus
 from bot.services.storage_alerts import StorageAlerts
-from tests.conftest import ADMIN_ID, FAKE_TOKEN, FakeUser, MockSession
+from tests.conftest import ACCEPTED, ADMIN_ID, FAKE_TOKEN, FakeUser, MockSession, app_number
 from tests.test_delivery import fail_admin_with
 from tests.test_flow import SUBMIT, TASK, fill_until_summary
 from tests.test_storage import connect, make_app, mode, rows
@@ -127,7 +127,7 @@ async def test_startup_reports_working_database(
     await start(create_dispatcher(settings, database=status), bot)
     (message,) = session.sent(ADMIN_ID)
     assert message.text == (
-        texts.ADMIN_STARTED + "\n\nБаза данных: работает (схема v3, заявок: 2)."
+        texts.ADMIN_STARTED + "\n\nБаза данных: работает (схема v4, заявок: 2)."
     )
 
 
@@ -210,10 +210,10 @@ async def test_alert_goes_after_application_and_client_is_answered(
     client = new_client(dispatcher(make_settings(tmp_path), repository), bot, session)
     await submit(client, session)
     application, alert = session.sent(ADMIN_ID)
-    number = session.last_sent(client.chat.id).text.rsplit(" ", 1)[-1]
+    number = app_number(session.last_sent(client.chat.id).text)
     assert f"№ {number}" in application.text
     assert alert.text == texts.ADMIN_DB_SAVE_FAILED.format(app_id=number, error="OperationalError")
-    assert session.last_sent(client.chat.id).text.startswith("Заявка принята.")
+    assert session.last_sent(client.chat.id).text.startswith(ACCEPTED)
 
 
 async def test_failed_alert_does_not_break_application(
@@ -231,7 +231,7 @@ async def test_failed_alert_does_not_break_application(
     client = new_client(dp, bot, session)
     await submit(client, session)
 
-    assert session.last_sent(client.chat.id).text.startswith("Заявка принята.")
+    assert session.last_sent(client.chat.id).text.startswith(ACCEPTED)
     assert sum("Новая заявка №" in m.text for m in session.sent(ADMIN_ID)) == 1
     assert "Не удалось уведомить администратора о сбое базы: TelegramNetworkError" in caplog.text
     for personal in PERSONAL:
@@ -250,11 +250,11 @@ async def test_mark_failure_is_reported_with_its_own_text(
     repository = BrokenRepository(mark_error=lambda: sqlite3.OperationalError("locked"))
     client = new_client(dispatcher(make_settings(tmp_path), repository), bot, session)
     await submit(client, session)
-    number = session.last_sent(client.chat.id).text.rsplit(" ", 1)[-1]
+    number = app_number(session.last_sent(client.chat.id).text)
     assert alerts(session) == [
         texts.ADMIN_DB_MARK_FAILED.format(app_id=number, error="OperationalError")
     ]
-    assert session.last_sent(client.chat.id).text.startswith("Заявка принята.")
+    assert session.last_sent(client.chat.id).text.startswith(ACCEPTED)
 
 
 async def test_concurrent_failures_send_one_alert() -> None:
@@ -286,7 +286,7 @@ async def test_db_work_is_done_even_if_client_blocked_bot(
     await fill_until_summary(client, session)
 
     def hook(method: TelegramMethod) -> None:
-        if isinstance(method, SendMessage) and method.text.startswith("Заявка принята"):
+        if isinstance(method, SendMessage) and method.text.startswith(ACCEPTED):
             raise TelegramForbiddenError(method, "Forbidden: bot was blocked by the user")
         return None
 
@@ -346,7 +346,7 @@ async def test_id_collision_is_reported_and_other_row_not_marked(
     assert alerts(session) == [
         texts.ADMIN_DB_SAVE_FAILED.format(app_id="261019-ABCD", error="ApplicationIdTakenError")
     ]
-    assert session.last_sent(client.chat.id).text.startswith("Заявка принята.")
+    assert session.last_sent(client.chat.id).text.startswith(ACCEPTED)
     (row,) = rows(settings.database_path)
     assert row["applicant_user_id"] == make_app().applicant.user_id  # чужая строка цела
 
@@ -396,7 +396,7 @@ async def test_migrates_v1_file_with_data(tmp_path: Path) -> None:
 
     async with SqliteRepository(db) as repository:
         status = await repository.status()
-        assert (status.schema_version, status.applications) == (3, 1)  # v1 → v2 → v3
+        assert (status.schema_version, status.applications) == (4, 1)  # v1 → … → v4
         old = await repository.get("261018-AAAA")
         assert old is not None and old.application.task == "Магазин запчастей"
         assert await repository.get_delivered_at("261018-AAAA") is None  # старым — NULL
@@ -411,4 +411,4 @@ async def test_migrates_v1_file_with_data(tmp_path: Path) -> None:
 
 async def test_new_database_is_created_at_latest_version(tmp_path: Path) -> None:
     async with SqliteRepository(tmp_path / "bot.db") as repository:
-        assert (await repository.status()).schema_version == len(sqlite_repository.MIGRATIONS) == 3
+        assert (await repository.status()).schema_version == len(sqlite_repository.MIGRATIONS) == 4

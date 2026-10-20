@@ -19,6 +19,7 @@ from aiogram.types import Chat, Message, User
 from bot import texts
 from bot.callbacks import FormAction, FormCallback
 from tests.conftest import (
+    ACCEPTED,
     ADMIN_ID,
     CLIENT_ID,
     FakeUser,
@@ -110,7 +111,7 @@ async def test_privacy_restricted_button_falls_back(dp, bot, session: MockSessio
     attempts = session.sent(ADMIN_ID)
     assert len(attempts) == 2
     assert [b[0] for b in buttons(attempts[-1])] == [texts.BTN_TAKE]
-    assert session.last_sent(5200).text.startswith("Заявка принята.")
+    assert session.last_sent(5200).text.startswith(ACCEPTED)
 
 
 async def test_network_failure_retries_then_succeeds(
@@ -123,7 +124,7 @@ async def test_network_failure_retries_then_succeeds(
     await client.press(SUBMIT)
     assert len(session.sent(ADMIN_ID)) == 3  # 2 сбоя + успех
     assert sleeps == [0.01, 0.01]  # паузы из настроек между попытками
-    assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+    assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
 
 
 async def test_retry_after_is_respected(
@@ -133,7 +134,7 @@ async def test_retry_after_is_respected(
     session.hook = fail_admin_with(lambda m: TelegramRetryAfter(m, "Too Many Requests", 7), times=1)
     await client.press(SUBMIT)
     assert sleeps == [7.0]
-    assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+    assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
 
 
 async def test_delivery_failure_tells_client_and_keeps_summary(
@@ -162,7 +163,7 @@ async def test_delivery_failure_tells_client_and_keeps_summary(
     # Повторная попытка после восстановления сети проходит
     session.hook = None
     await client.press(SUBMIT)
-    assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+    assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
 
 
 async def test_forbidden_is_not_retried(
@@ -175,7 +176,7 @@ async def test_forbidden_is_not_retried(
     await client.press(SUBMIT)
     assert len(session.sent(ADMIN_ID)) == 1
     assert sleeps == []
-    assert session.sent(CLIENT_ID)[-2].text.startswith("Не получилось отправить заявку")
+    assert session.sent(CLIENT_ID)[-2].text.startswith("⚠️ <b>Не получилось отправить заявку</b>")
 
 
 async def test_double_submit_sends_once(client: FakeUser, session: MockSession) -> None:
@@ -220,7 +221,7 @@ async def test_double_tap_on_button_moves_one_step(client: FakeUser, session: Mo
     session.clear()
     await asyncio.gather(client.press(landing, on=question), client.press(landing, on=question))
     asked = [m.text for m in session.sent(CLIENT_ID)]
-    assert len(asked) == 1 and asked[0].startswith("Шаг 4 из 5")
+    assert len(asked) == 1 and asked[0].startswith("<b>Шаг 4 из 5</b>")
     assert texts.UNEXPECTED_ERROR not in asked
 
 
@@ -236,7 +237,7 @@ async def test_resubmit_after_failure_keeps_number(
     await client.press(SUBMIT)
     assert session.sent(ADMIN_ID)[-1].text.split("\n")[0] == first
     number = first.removeprefix("<b>Новая заявка № ").removesuffix("</b>")
-    assert session.last_sent(CLIENT_ID).text.endswith(number)
+    assert f"<code>{number}</code>" in session.last_sent(CLIENT_ID).text
 
     # Следующая заявка — уже с новым номером
     await fill_until_summary(client, session)
@@ -252,7 +253,7 @@ async def test_rate_limit_per_user(client: FakeUser, session: MockSession) -> No
 
     await client.send("/start")
     await client.press(APPLY)
-    assert session.last_sent(CLIENT_ID).text.startswith("Вы уже отправили несколько заявок")
+    assert session.last_sent(CLIENT_ID).text.startswith("⏳ <b>Вы уже отправили несколько заявок")
     assert len(session.sent(ADMIN_ID)) == 3
 
 
@@ -266,7 +267,7 @@ async def test_failed_delivery_does_not_consume_limit(
     session.hook = None
     await fill_until_summary(client, session)
     await client.press(SUBMIT)
-    assert session.last_sent(CLIENT_ID).text.startswith("Заявка принята.")
+    assert session.last_sent(CLIENT_ID).text.startswith(ACCEPTED)
 
 
 async def test_take_in_work_by_admin(
@@ -292,7 +293,9 @@ async def test_take_in_work_by_admin(
     # Осталась только кнопка-ссылка «Написать клиенту»
     remaining = [b.text for row in edit.reply_markup.inline_keyboard for b in row]
     assert remaining == [texts.BTN_WRITE_TO_CLIENT]
-    assert session.answers()[-1].text == texts.ADMIN_TAKEN_ALERT
+    # Базы в этом тесте нет (NullRepository) — всплывашка честно говорит, что клиенту
+    # не сообщено (этап 2в).
+    assert session.answers()[-1].text == texts.ADMIN_TAKEN_NO_CLIENT_NOTICE
 
 
 async def test_group_chats_are_ignored(dp, bot, session: MockSession) -> None:

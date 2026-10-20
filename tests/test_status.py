@@ -71,7 +71,7 @@ async def test_migrates_v2_file_with_data(tmp_path: Path) -> None:
     db.chmod(0o640)
 
     async with SqliteRepository(db) as repository:
-        assert (await repository.status()).schema_version == 3
+        assert (await repository.status()).schema_version == 4  # v2 → v3 → v4
         old = await record(repository, "261018-AAAA")
         assert (old.status, old.taken_at, old.closed_at) == (NEW, None, None)
         assert old.delivered_at == datetime(2026, 10, 18, 9, 0, 5, tzinfo=UTC)

@@ -28,6 +28,7 @@ from bot.keyboards import (
     panel_list_keyboard,
 )
 from bot.models import ALLOWED_TRANSITIONS, ApplicationRecord, ApplicationStatus
+from bot.services.client_notifier import ClientNotifier
 from bot.services.formatting import (
     admin_reply_url,
     format_panel_card,
@@ -71,6 +72,7 @@ async def cb_panel(
     bot: Bot,
     settings: Settings,
     repository: ApplicationRepository,
+    client_notifier: ClientNotifier,
 ) -> None:
     # Права — по нажавшему, а не по чату: кнопку мог нажать кто угодно, кому
     # попало это сообщение. Посторонний получает нейтральный ответ, сообщение
@@ -89,6 +91,7 @@ async def cb_panel(
 
     data = callback_data
     popup: str | None = None
+    newly_taken = False
     match data.a:
         case PanelAction.HOME:
             screen = await _home_screen(repository)
@@ -99,9 +102,12 @@ async def cb_panel(
         case PanelAction.ASK_CANCEL:
             screen = await _confirm_cancel_screen(repository, settings, data)
         case PanelAction.SET:
-            popup, screen = await _set_status(repository, settings, data)
+            popup, screen, newly_taken = await _set_status(repository, settings, data)
     await callback.answer(popup)
     await _show(bot, callback, screen)
+    if newly_taken:
+        # Последним: сбой отправки клиенту не должен мешать экрану и ответу на нажатие.
+        await client_notifier.application_taken(bot, repository, data.i)
 
 
 # ---------- экраны ----------
@@ -179,25 +185,27 @@ async def _confirm_cancel_screen(
 
 async def _set_status(
     repository: ApplicationRepository, settings: Settings, data: PanelCallback
-) -> tuple[str | None, Screen]:
+) -> tuple[str | None, Screen, bool]:
+    """Смена статуса. Третий элемент — заявку только что взяли в работу (new → in_work)."""
     if not repository.available:
-        return None, (texts.PANEL_DB_UNAVAILABLE, panel_home_only_keyboard())
+        return None, (texts.PANEL_DB_UNAVAILABLE, panel_home_only_keyboard()), False
     try:
         target = ApplicationStatus(data.t)
     except ValueError:
         logger.warning("panel: неизвестный статус %r", data.t)
-        return texts.STALE_BUTTON, await _card_screen(repository, settings, data.i, data.f, data.p)
+        screen = await _card_screen(repository, settings, data.i, data.f, data.p)
+        return texts.STALE_BUTTON, screen, False
     try:
         change = await repository.set_status(data.i, target, datetime.now(UTC))
     except Exception as exc:
         error = type(exc).__name__
         logger.error("panel: заявка %r — статус %s не записан: %s", data.i, target.value, error)
         screen = await _card_screen(repository, settings, data.i, data.f, data.p)
-        return texts.PANEL_STATUS_FAILED.format(error=error), screen
+        return texts.PANEL_STATUS_FAILED.format(error=error), screen, False
 
     record = change.record
     if change.outcome is StatusOutcome.NOT_FOUND or record is None:
-        return None, _not_found_screen(data.i)
+        return None, _not_found_screen(data.i), False
     match change.outcome:
         case StatusOutcome.CHANGED:
             logger.info("panel: заявка %s → %s", record.application.id, record.status.value)
@@ -206,7 +214,10 @@ async def _set_status(
             popup = texts.PANEL_STATUS_ALREADY.format(label=record.status.label)
         case _:
             popup = texts.PANEL_STATUS_NOT_ALLOWED.format(label=record.status.label)
-    return popup, _card(record, settings, data.f, data.p)
+    newly_taken = (
+        change.outcome is StatusOutcome.CHANGED and record.status is ApplicationStatus.IN_WORK
+    )
+    return popup, _card(record, settings, data.f, data.p), newly_taken
 
 
 # ---------- помощники ----------
