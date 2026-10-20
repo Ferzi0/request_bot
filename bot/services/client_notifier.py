@@ -14,6 +14,11 @@
 - любая другая ошибка — неизвестно, дошло ли: метку оставляем (без дублей), администратору
   — уведомление. Ничего не теряется молча.
 
+Сообщение — картинка in_work.jpg с подписью через PhotoSender. Сбой самого фото
+недоставкой не считается: PhotoSender сразу шлёт тот же текст обычным сообщением.
+До классификации выше доходит только ошибка этого запасного текста — значит,
+клиенту не дошло ничего.
+
 Ошибки наружу не выходят: смена статуса и ответ администратору уже состоялись.
 В лог и администратору — только номер заявки и класс ошибки.
 """
@@ -30,6 +35,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 
 from bot import texts
+from bot.services.media import PhotoSender, Picture
 from bot.services.storage import ApplicationRepository
 
 logger = logging.getLogger(__name__)
@@ -49,8 +55,16 @@ def format_client_taken(app_id: str) -> str:
 
 
 class ClientNotifier:
-    def __init__(self, admin_id: int, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        admin_id: int,
+        clock: Callable[[], datetime] | None = None,
+        *,
+        media: PhotoSender | None = None,
+    ) -> None:
         self._admin_id = admin_id
+        # Общий с приветствием PhotoSender — общий кэш file_id (см. bot/app.py).
+        self._media = media or PhotoSender()
         self._clock = clock or (lambda: datetime.now(UTC))  # подменяется в тестах
 
     async def application_taken(
@@ -69,7 +83,7 @@ class ClientNotifier:
             return ClientNotice.SKIPPED  # метку уже поставили раньше — второй раз не пишем
 
         try:
-            await bot.send_message(user_id, format_client_taken(app_id))
+            await self._media.send(bot, user_id, Picture.IN_WORK, format_client_taken(app_id))
         except Exception as exc:
             error = type(exc).__name__
             if isinstance(exc, _TEMPORARY):

@@ -75,9 +75,10 @@ def create_dispatcher(
     dp["repository"] = repository or NullRepository()
     dp["database"] = database
     dp["storage_alerts"] = StorageAlerts(settings.admin_id)
-    dp["client_notifier"] = ClientNotifier(settings.admin_id)
+    media = PhotoSender()  # один на бота: file_id картинок загружаются один раз
+    dp["media"] = media
+    dp["client_notifier"] = ClientNotifier(settings.admin_id, media=media)
     dp["panel_messages"] = PanelMessages()
-    dp["media"] = PhotoSender()
 
     private_only = PrivateChatOnlyMiddleware()
     dp.message.outer_middleware(private_only)

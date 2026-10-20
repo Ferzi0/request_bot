@@ -32,6 +32,7 @@ class Picture(StrEnum):
 
     WELCOME = "welcome.jpg"
     ACCEPTED = "accepted.jpg"
+    IN_WORK = "in_work.jpg"  # уведомление «заявка принята в работу» (services/client_notifier)
 
 
 def fits_caption(caption: str) -> bool:

@@ -25,15 +25,16 @@ from aiogram.exceptions import (
     TelegramServerError,
     TelegramUnauthorizedError,
 )
-from aiogram.methods import SendMessage, TelegramMethod
-from aiogram.types import User
+from aiogram.methods import SendMessage, SendPhoto, TelegramMethod
+from aiogram.types import FSInputFile, User
 
 from bot import texts
 from bot.callbacks import PanelAction, PanelCallback
 from bot.config import Settings
-from bot.models import ApplicationStatus
+from bot.models import Applicant, ApplicationStatus
 from bot.services import sqlite_repository
 from bot.services.client_notifier import ClientNotice, ClientNotifier, format_client_taken
+from bot.services.media import CAPTION_LIMIT, fits_caption
 from bot.services.sqlite_repository import SqliteRepository
 from bot.services.storage import NullRepository
 from tests.conftest import ADMIN_ID, CLIENT_ID, FakeUser, MockSession, as_telegram_sees
@@ -84,9 +85,11 @@ async def take_from_panel(admin: FakeUser, app_id: str, target: ApplicationStatu
 
 def fail_client_with(exc_factory):  # type: ignore[no-untyped-def]
     def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
-        to_client = isinstance(method, SendMessage) and int(method.chat_id) == CLIENT_ID
-        if to_client and "принята в работу" in method.text:
-            raise exc_factory(method)
+        # Клиенту не доходит ничего: ни фото in_work.jpg, ни запасной текст (этап 2е).
+        if isinstance(method, SendPhoto | SendMessage) and int(method.chat_id) == CLIENT_ID:
+            text = method.caption if isinstance(method, SendPhoto) else method.text
+            if "принята в работу" in (text or ""):
+                raise exc_factory(method)
         return None
 
     return hook
@@ -130,7 +133,7 @@ async def test_take_button_notifies_client_once(
     assert admin_failures(session) == []
     # Порядок: отметка у администратора и ответ на нажатие — до сообщения клиенту
     order = [type(m).__name__ for m in session.requests[-3:]]
-    assert order == ["EditMessageText", "AnswerCallbackQuery", "SendMessage"]
+    assert order == ["EditMessageText", "AnswerCallbackQuery", "SendPhoto"]
 
     # Старый экран (кнопка ещё видна) — повторное «В работу» клиенту не пишет
     await admin_user.press(take_data(notification), on=notification)
@@ -278,7 +281,7 @@ async def test_admin_notice_failure_is_swallowed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
-        if isinstance(method, SendMessage):
+        if isinstance(method, SendMessage | SendPhoto):
             raise TelegramNetworkError(method, "down")  # не уходит ни клиенту, ни админу
         return None
 
@@ -504,5 +507,179 @@ async def test_panel_order_screen_before_client(
     await repo.add(make_app("261020-0001"))
     await take_from_panel(admin_user, "261020-0001", IN_WORK)
     order = [type(m).__name__ for m in session.requests[-3:]]
-    assert order == ["AnswerCallbackQuery", "EditMessageText", "SendMessage"]
+    assert order == ["AnswerCallbackQuery", "EditMessageText", "SendPhoto"]
     assert int(session.requests[-1].chat_id) == CLIENT_ID  # type: ignore[attr-defined]
+
+
+# ---------- картинка in_work.jpg (этап 2е) ----------
+
+
+def notice_photos(session: MockSession) -> list[SendPhoto]:
+    return [p for p in session.photos() if "принята в работу" in (p.caption or "")]
+
+
+async def test_notice_is_photo_with_caption(
+    admin_user: FakeUser, repo: SqliteRepository, session: MockSession
+) -> None:
+    await repo.add(make_app("261020-0001"))
+    await take_from_panel(admin_user, "261020-0001", IN_WORK)
+    (photo,) = notice_photos(session)
+    assert int(photo.chat_id) == CLIENT_ID
+    assert photo.caption == format_client_taken("261020-0001")
+    assert isinstance(photo.photo, FSInputFile) and Path(photo.photo.path).name == "in_work.jpg"
+    # Текстом уведомление не дублируется
+    assert not [
+        m for m in session.requests if isinstance(m, SendMessage) and int(m.chat_id) == CLIENT_ID
+    ]
+    assert session.photos(ADMIN_ID) == []  # администратору картинок нет
+
+
+async def test_second_client_uses_cached_file_id(
+    ndp: Dispatcher, admin_user: FakeUser, repo: SqliteRepository, session: MockSession
+) -> None:
+    other = Applicant(user_id=3000, username=None, full_name="Олег")
+    await repo.add(make_app("261020-0001"))
+    await repo.add(make_app("261020-0002", applicant=other))
+    await take_from_panel(admin_user, "261020-0001", IN_WORK)
+    await take_from_panel(admin_user, "261020-0002", IN_WORK)
+    first, second = notice_photos(session)
+    assert isinstance(first.photo, FSInputFile)
+    assert second.photo == "file-id-in_work.jpg" and int(second.chat_id) == 3000
+    # Кэш общий с приветствием: один PhotoSender на бота
+    assert ndp["client_notifier"]._media is ndp["media"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda m: TelegramBadRequest(m, "Bad Request: IMAGE_PROCESS_FAILED"),
+        lambda m: TelegramNetworkError(m, "timeout"),
+        lambda m: TelegramForbiddenError(m, "Forbidden: странный отказ только фото"),
+    ],
+)
+async def test_photo_failure_falls_back_to_text_and_counts_as_sent(
+    admin_user: FakeUser,
+    repo: SqliteRepository,
+    session: MockSession,
+    caplog: pytest.LogCaptureFixture,
+    error,  # type: ignore[no-untyped-def]
+) -> None:
+    """Не ушло только фото, а запасной текст дошёл — это доставка, а не сбой."""
+
+    def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
+        if isinstance(method, SendPhoto):
+            raise error(method)
+        return None
+
+    await repo.add(make_app("261020-0001"))
+    session.hook = hook
+    caplog.set_level(logging.INFO)
+    await take_from_panel(admin_user, "261020-0001", IN_WORK)
+    (notice,) = client_notices(session)
+    assert not session.is_photo(notice) and notice.text == format_client_taken("261020-0001")
+    assert (await repo.get("261020-0001")).client_notified_at is not None  # type: ignore[union-attr]
+    assert admin_failures(session) == []  # администратору — ничего лишнего
+    assert "отправлено «принята в работу»" in caplog.text
+
+
+async def test_blocked_client_photo_and_text_no_error_log(
+    admin_user: FakeUser,
+    repo: SqliteRepository,
+    session: MockSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await repo.add(make_app("261020-0001"))
+    session.hook = fail_client_with(lambda m: TelegramForbiddenError(m, "Forbidden: blocked"))
+    caplog.set_level(logging.INFO)
+    await take_from_panel(admin_user, "261020-0001", IN_WORK)
+    blocked = [m for m in session.requests if getattr(m, "chat_id", None) == CLIENT_ID]
+    assert [type(m).__name__ for m in blocked] == ["SendPhoto", "SendMessage"]  # фото, затем текст
+    assert (await repo.get("261020-0001")).client_notified_at is not None  # type: ignore[union-attr]
+    assert admin_failures(session) == [
+        texts.ADMIN_CLIENT_NOTICE_FAILED.format(
+            app_id="261020-0001", error="TelegramForbiddenError"
+        )
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert session.photos(ADMIN_ID) == []  # сообщение администратору — текстом, без картинки
+
+
+@pytest.mark.parametrize(
+    ("photo_error", "text_error", "released"),
+    [
+        # Фото отклонено «навсегда», текст упал по сети — решает текст: метку снять.
+        (
+            lambda m: TelegramForbiddenError(m, "Forbidden: только фото"),
+            lambda m: TelegramNetworkError(m, "timeout"),
+            True,
+        ),
+        # Фото упало по сети (могло и дойти), текст — блокировка: метка остаётся.
+        (
+            lambda m: TelegramNetworkError(m, "timeout"),
+            lambda m: TelegramForbiddenError(m, "Forbidden: blocked"),
+            False,
+        ),
+        # RetryAfter на фото, текст отклонён — классифицируется текст.
+        (_retry_after, lambda m: TelegramBadRequest(m, "chat not found"), False),
+    ],
+    ids=["photo-403-text-net", "photo-net-text-403", "photo-429-text-400"],
+)
+async def test_mark_fate_follows_fallback_text_error(
+    repo: SqliteRepository,
+    bot: Bot,
+    session: MockSession,
+    photo_error,  # type: ignore[no-untyped-def]
+    text_error,  # type: ignore[no-untyped-def]
+    released: bool,
+) -> None:
+    """Классифицируется ошибка запасного ТЕКСТА: после неё клиенту не дошло ничего."""
+
+    def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
+        if int(getattr(method, "chat_id", 0) or 0) != CLIENT_ID:
+            return None
+        if isinstance(method, SendPhoto):
+            raise photo_error(method)
+        if isinstance(method, SendMessage):
+            raise text_error(method)
+        return None
+
+    await repo.add(make_app("261020-0001"))
+    await repo.set_status("261020-0001", IN_WORK, T0)
+    session.hook = hook
+    notifier = ClientNotifier(ADMIN_ID, clock=lambda: T0)
+    assert await notifier.application_taken(bot, repo, "261020-0001") is ClientNotice.FAILED
+    mark = (await repo.get("261020-0001")).client_notified_at  # type: ignore[union-attr]
+    assert (mark is None) is released
+    assert admin_failures(session) == [
+        texts.ADMIN_CLIENT_NOTICE_FAILED.format(
+            app_id="261020-0001", error=type(text_error(None)).__name__
+        )
+    ]
+
+
+async def test_retry_after_on_photo_text_delivered_is_sent(
+    repo: SqliteRepository, bot: Bot, session: MockSession
+) -> None:
+    """Флуд-лимит только на фото: текст дошёл — доставка, метка стоит, админу ничего."""
+
+    def hook(method: TelegramMethod) -> None:  # type: ignore[type-arg]
+        if isinstance(method, SendPhoto):
+            raise _retry_after(method)
+        return None
+
+    await repo.add(make_app("261020-0001"))
+    await repo.set_status("261020-0001", IN_WORK, T0)
+    session.hook = hook
+    notifier = ClientNotifier(ADMIN_ID, clock=lambda: T0)
+    assert await notifier.application_taken(bot, repo, "261020-0001") is ClientNotice.SENT
+    assert (await repo.get("261020-0001")).client_notified_at == T0  # type: ignore[union-attr]
+    (notice,) = client_notices(session)
+    assert not session.is_photo(notice)
+    assert admin_failures(session) == []
+
+
+def test_notice_caption_fits_photo_limit() -> None:
+    caption = format_client_taken("999999-FFFF")
+    assert fits_caption(caption)
+    plain, _ = as_telegram_sees(caption)
+    assert len(plain.encode("utf-16-le")) // 2 <= CAPTION_LIMIT
