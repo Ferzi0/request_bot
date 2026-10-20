@@ -208,8 +208,8 @@ def panel_card_keyboard(
         )
         data = PanelCallback(a=action, f=list_filter, p=page, i=app_id, t=target.value)
         actions.append(_panel(_TRANSITION_BUTTONS[target], data))
-    if actions:
-        rows.append(actions)
+    # По одной кнопке в строке: три в ряд Telegram обрезает до «…ить» и «…вые».
+    rows.extend([button] for button in actions)
     rows.append(
         [
             _panel(

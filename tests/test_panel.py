@@ -255,6 +255,8 @@ async def test_card_buttons_by_status(
     text, markup = screen(session)
     assert labels(markup) == [texts.BTN_WRITE_TO_CLIENT, *actions, texts.PANEL_BTN_BACK_TO_LIST]
     assert markup.inline_keyboard[0][0].url == "https://t.me/anna_k"
+    # Три кнопки в ряд Telegram обрезает («…ить»): в карточке по одной в строке.
+    assert all(len(row) == 1 for row in markup.inline_keyboard)
     assert text.startswith(f"<b>Заявка № {app_id}</b>")
     assert "<b>Контакт:</b> anna@mail.ru" in text  # в карточке — полные данные
     assert f"<b>Статус:</b> {status.icon} {status.label}" in text
