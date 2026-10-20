@@ -72,6 +72,8 @@ def create_dispatcher(
         settings.admin_id, settings.tz, settings.send_retry_delays, **notifier_kwargs
     )
     dp["limiter"] = SlidingWindowLimiter(settings.applications_per_hour, window=3600)
+    # Подсказка «диалог был прерван» — не чаще раза в минуту на человека.
+    dp["restart_hints"] = SlidingWindowLimiter(1, window=60)
     dp["repository"] = repository or NullRepository()
     dp["database"] = database
     dp["storage_alerts"] = StorageAlerts(settings.admin_id)
