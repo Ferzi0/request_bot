@@ -92,7 +92,7 @@ def test_popups_have_no_html() -> None:
 
 def test_greeting_keeps_only_site_facts() -> None:
     plain, _ = as_telegram_sees(texts.GREETING)
-    for fact in ("Эдуарда Торгашова (Ferz)", "Челябинска", "удалённо", "в течение дня"):
+    for fact in ("Эдуарда Торгашова", "Челябинска", "удалённо", "в течение дня"):
         assert fact in plain
     assert not re.search(r"\d", plain)  # ни цен, ни сроков в цифрах
 

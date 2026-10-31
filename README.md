@@ -1,6 +1,6 @@
 # ferz-bot
 
-Telegram-бот приёма заявок для сайта Эдуарда Торгашова (Ferz). Python + aiogram 3, long polling, SQLite.
+Telegram-бот приёма заявок для сайта Эдуарда Торгашова. Python + aiogram 3, long polling, SQLite.
 История решений и этапов — в [`STATUS.md`](STATUS.md) (единственный источник правды); этот файл — как всё устроено и как с этим работать.
 
 ## Содержание
