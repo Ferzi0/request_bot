@@ -99,7 +99,7 @@ def test_description_has_no_prices_or_made_up_terms() -> None:
         lowered = text.lower()
         assert "₽" not in text and "руб" not in lowered
         assert not any(ch.isdigit() for ch in text)  # ни цен, ни сроков цифрами
-        assert "в течение двух часов" in lowered  # единственный срок — с сайта
+        assert "в течение дня" in lowered  # единственный срок — с сайта
         assert "<" not in text  # описание Telegram показывает как есть, без HTML
 
 

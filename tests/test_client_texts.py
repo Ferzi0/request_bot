@@ -80,7 +80,7 @@ def test_all_client_texts_have_balanced_markup() -> None:
 
 def test_sent_shows_number_in_monospace() -> None:
     plain, entities = as_telegram_sees(texts.SENT.format(app_id="261020-676A"))
-    assert plain == "✅ Заявка принята\nНомер: 261020-676A\nОтвечу в течение двух часов."
+    assert plain == "✅ Заявка принята\nНомер: 261020-676A\nОтвечу в течение дня."
     assert [e.type for e in entities] == ["bold", "code"]
 
 
@@ -92,7 +92,7 @@ def test_popups_have_no_html() -> None:
 
 def test_greeting_keeps_only_site_facts() -> None:
     plain, _ = as_telegram_sees(texts.GREETING)
-    for fact in ("Эдуарда Торгашова (Ferz)", "Челябинска", "удалённо", "в течение двух часов"):
+    for fact in ("Эдуарда Торгашова (Ferz)", "Челябинска", "удалённо", "в течение дня"):
         assert fact in plain
     assert not re.search(r"\d", plain)  # ни цен, ни сроков в цифрах
 
